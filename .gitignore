@@ -1,0 +1,18 @@
+# Datos sensibles — no subir
+datos/*.xlsx
+datos/*.bak
+datos/comprobantes_cache.json
+datos/mep_cache.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Claude Code (herramienta de desarrollo, no parte del proyecto)
+.claude/
+xlsx/
