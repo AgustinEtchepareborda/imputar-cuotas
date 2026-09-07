@@ -80,10 +80,12 @@ En cambio, el script:
 
 ## Cómo resuelve el script clientes no encontrados por CUIT
 
-Si el CUIT de una transferencia no está en deudores:
-1. Busca ese CUIT en las últimas 8 hojas de imputaciones → extrae el nombre de col H
-2. Busca ese nombre en deudores por palabras clave (case-insensitive)
-3. Si hay 1 match → imputa; si hay 0 o varios → reporta como ambiguo
+Muchos clientes transfieren desde el número de cuenta (`402...`, `440...`), no desde su CUIT. Si el CUIT/cuenta de una transferencia no está en deudores:
+1. Busca ese número en las **últimas 20 hojas** de imputaciones (6 si es USD) **y en las filas ya imputadas —amarillas— de la hoja actual** (las hojas USD son acumulativas: el antecedente del mismo cliente suele estar más abajo en la misma hoja) → extrae el nombre de col H
+2. Del texto de col H se corta todo lo que va desde el primer marcador `cN`/`lN` en adelante (`"Fulano c8 en ambos lotes mismo monto"` → `"Fulano"`), porque las notas sueltas rompían la búsqueda
+3. Busca ese nombre en deudores por palabras clave (case-insensitive)
+4. Si hay 1 match → imputa; si hay **varios pero todos del mismo titular** → los trata como lotes del mismo cliente (sigue por la lógica de reparto); si hay 0 o varios con nombres distintos → reporta como ambiguo
+5. Dos transferencias de **cuentas distintas** que resuelven al mismo cliente por nombre se imputan como cuotas consecutivas en la misma fila (la identidad es el nombre, no el número de cuenta)
 
 ## Cómo imputa múltiples lotes del mismo cliente
 
@@ -91,6 +93,8 @@ Si un CUIT tiene N lotes en deudores y llegan N transferencias iguales:
 - Si todos los lotes tienen el **mismo nombre**: agrega `l{LOTE}` en el label (ej: `Apellido Nombre l6 c13`)
 - Si los lotes tienen **nombres distintos**: usa el nombre del lote, sin aclarar lote
 - Asigna lotes en orden (por hoja+fila) sin reutilizar el mismo lote en la misma corrida
+
+**Una transferencia que cubre varios lotes** (ej: paga 2 cuotas de una): si el monto ≈ la suma de los teóricos de **N** lotes libres, reparte **una cuota a cada lote** (cada uno con su propio teórico y su propia numeración de cuota) y escribe `Nombre l13 c33 y l14 c23`. Prueba N de mayor a menor: no hace falta que el monto cubra *todos* los lotes del CUIT — un cliente puede figurar como cofirmante en un lote de otro titular que no se paga hace meses. Para elegir cuáles, prioriza los lotes con el pago más reciente (la columna "NUMERO DE CUOTA" más a la derecha con valor). Solo si ningún reparto cierra apila las N cuotas en un único lote (el de teórico más parecido).
 
 ## Estructura de imputaciones.xlsx
 
