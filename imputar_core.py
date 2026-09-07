@@ -236,6 +236,49 @@ def mapa_meses_columnas(ws, header_row):
     return mapa
 
 
+# Marcador de cuota/lote dentro de col H de imputaciones ("c14", "l13 c29",
+# "c8 en ambos lotes mismo monto"). El nombre se corta en el PRIMER marcador:
+# lo que sigue son notas sueltas que ensuciaban la búsqueda por nombre.
+_RE_MARCA_LOTE_CUOTA = re.compile(r'(?:^|[\s,;.\-])[cl]\s*\d', re.IGNORECASE)
+
+
+def limpiar_nombre_col_h(col_h_str):
+    """Nombre del cliente a partir del texto de col H de imputaciones."""
+    m = _RE_MARCA_LOTE_CUOTA.search(col_h_str)
+    nombre = col_h_str[:m.start()] if m else col_h_str
+    return re.sub(r'\s+', ' ', nombre).strip(' ,;.-')
+
+
+def cuota_en_col_h(col_h_str):
+    """Máxima cuota mencionada en col H ("c8 en ambos lotes" → 8)."""
+    nums = []
+    for grupo in re.findall(r'(?:^|[\s,;.\-])c\s*(\d+(?:\s*[,yY]\s*\d+)*)', col_h_str):
+        nums += [int(n) for n in re.findall(r'\d+', grupo)]
+    nums = [n for n in nums if 0 < n <= 200]
+    return max(nums) if nums else None
+
+
+def _mismo_cliente(matches):
+    """True si todas las filas candidatas son del mismo titular (varios lotes)."""
+    return len({_norm(str(n)).strip() for _, _, n in matches}) == 1
+
+
+def _ultima_col_cuota(ws, row, hist_cols, excluir_col=None):
+    """Columna 'NUMERO DE CUOTA' más a la derecha con valor en esa fila.
+
+    Proxy de "hace cuánto se paga este lote": se usa para elegir a qué lotes va
+    el reparto cuando un CUIT figura en más lotes de los que cubre el monto
+    (p. ej. como cofirmante de un lote de otro titular que no paga hace meses).
+    """
+    ultima = -1
+    for c in hist_cols:
+        if c == excluir_col:
+            continue
+        if max_cuota_celda(ws.cell(row, c).value) is not None:
+            ultima = max(ultima, c)
+    return ultima
+
+
 def _col_por_header(ws, header_row, keywords):
     """Primera columna cuyo header (normalizado) contiene alguna de keywords."""
     for c in range(1, ws.max_column + 1):
@@ -364,25 +407,29 @@ def buscar_en_deudores_por_nombre(nombre_str, nombre_index):
     return resultado
 
 
+# Cuántas hojas anteriores se miran para sacar el nombre de un CUIT/cuenta que
+# no está en deudores. Muchos clientes transfieren desde una cuenta (no desde su
+# CUIT) y pagan cada 2-3 meses: con una ventana corta el antecedente queda afuera.
+HOJAS_PREVIAS_PESOS = 20
+HOJAS_PREVIAS_USD = 6
+
+
 def build_previo(wb_imp, imp_sheet, es_usd=False):
     all_sheets = wb_imp.sheetnames
     try:
         idx_actual = all_sheets.index(imp_sheet)
         previas = list(reversed(all_sheets[:idx_actual]))
         if es_usd:
-            previas = [h for h in previas if 'usd' in h.lower()][:6]
+            previas = [h for h in previas if 'usd' in h.lower()][:HOJAS_PREVIAS_USD]
         else:
-            previas = previas[:8]
+            previas = previas[:HOJAS_PREVIAS_PESOS]
     except ValueError:
         previas = []
 
     cuit_to_nombre_previo = {}
     cuit_to_cuota_previo = {}
-    for hoja in previas:
-        try:
-            ws_prev = wb_imp[hoja]
-        except Exception:
-            continue
+
+    def _indexar(ws_prev, solo_amarillas=False):
         for row in ws_prev.iter_rows(min_row=4, max_row=ws_prev.max_row):
             concepto = row[2].value if len(row) > 2 else None
             col_h = row[7].value if len(row) > 7 else None
@@ -391,18 +438,32 @@ def build_previo(wb_imp, imp_sheet, es_usd=False):
             col_h_str = str(col_h).strip()
             if not col_h_str or 'PAGO MENOS' in col_h_str or 'Saldo' in col_h_str:
                 continue
+            if solo_amarillas and not is_row_yellow(ws_prev, row[0].row):
+                continue
             cuit = extract_cuit_from_concepto(concepto)
             if cuit and cuit not in cuit_to_nombre_previo:
-                # Maneja "c21", "c21,22 y 23", etc.
-                m_cuota = re.search(r'c(\d+(?:[\s,y]+\d+)*)\s*$', col_h_str, re.IGNORECASE)
-                if m_cuota:
-                    nums = re.findall(r'\d+', m_cuota.group(1))
-                    if nums:
-                        cuit_to_cuota_previo[cuit] = max(int(n) for n in nums)
-                nombre_prev = re.sub(r'\s*c\d+(?:[\s,y]+\d+)*\s*$', '', col_h_str, flags=re.IGNORECASE).strip()
-                nombre_prev = re.sub(r'\s*l\d+\s*$', '', nombre_prev, flags=re.IGNORECASE).strip()
+                cuota_prev = cuota_en_col_h(col_h_str)
+                if cuota_prev is not None:
+                    cuit_to_cuota_previo[cuit] = cuota_prev
+                nombre_prev = limpiar_nombre_col_h(col_h_str)
                 if nombre_prev:
                     cuit_to_nombre_previo[cuit] = nombre_prev
+
+    # La hoja ACTUAL primero (solo filas ya imputadas/amarillas): las hojas USD
+    # son acumulativas y arrastran meses de transferencias del mismo cliente más
+    # abajo en la misma hoja. Sin esto, el antecedente "estaba más abajo" nunca
+    # se miraba. Va primero porque es el dato más reciente (gana el primero).
+    try:
+        _indexar(wb_imp[imp_sheet], solo_amarillas=True)
+    except Exception:
+        pass
+
+    for hoja in previas:
+        try:
+            ws_prev = wb_imp[hoja]
+        except Exception:
+            continue
+        _indexar(ws_prev)
 
     return cuit_to_nombre_previo, cuit_to_cuota_previo
 
@@ -522,7 +583,7 @@ def procesar(
     pago_mas   = []
     sin_fila   = []  # nombre conocido pero sin fila en deudores → prellena col H sin amarillo
     usd_en_pesos = []  # clientes USD fijo que pagaron en pesos (conversión MEP)
-    written_deu_rows = {}  # (sname, srow) -> {'cuit': str, 'last_cuota': int}
+    written_deu_rows = {}  # (sname, srow) -> {'ident': str, 'last_cuota': int}
 
     EXCESO_LIMITE   = 50 if es_usd else 50_000   # exceso máximo para imputar normalmente
     MULTI_TOL_RATIO = 0.05                        # tolerancia proporcional para múltiplos
@@ -620,8 +681,14 @@ def procesar(
                 'cuota_col': u_cfg['cuota_col'],
                 'fecha_col': u_cfg['fecha_col'],
             })
-            written_deu_rows[(u_sname, u_srow)] = {'cuit': cuit_raw, 'last_cuota': next_cuota}
+            written_deu_rows[(u_sname, u_srow)] = {'ident': cuit_raw, 'last_cuota': next_cuota}
             continue
+
+        # Identidad del cliente para no apilar cuotas de dos personas distintas
+        # en la misma fila de deudores. Es el CUIT cuando el match vino del
+        # índice; si vino por nombre, es el nombre (un mismo cliente puede
+        # transferir desde varias cuentas distintas y ninguna ser su CUIT).
+        ident = cuit_raw
 
         if not matches:
             nombre_previo = cuit_to_nombre_previo.get(cuit_raw)
@@ -629,7 +696,14 @@ def procesar(
                 m2 = _buscar_nombre(nombre_previo)
                 if len(m2) == 1:
                     matches = m2
+                    ident = _norm(nombre_previo)
                     log_fn(f'Fila {row_num}: fallback nombre "{nombre_previo}" → {m2[0][2]}')
+                elif len(m2) > 1 and _mismo_cliente(m2):
+                    # Varios lotes del MISMO titular: no es ambiguo, es un
+                    # cliente con N lotes → sigue por la lógica de reparto.
+                    matches = m2
+                    ident = _norm(nombre_previo)
+                    log_fn(f'Fila {row_num}: fallback nombre "{nombre_previo}" → {m2[0][2]} ({len(m2)} lotes)')
                 elif len(m2) > 1:
                     ambiguous.append({'row': row_num, 'motivo': f'CUIT {cuit_raw} no en deudores; nombre "{nombre_previo}" da {len(m2)} candidatos', 'concepto': str(concepto)[:60], 'monto': monto_val, 'fecha': fecha_val, 'matches': [(n, None) for _, _, n in m2]})
                     continue
@@ -643,7 +717,12 @@ def procesar(
                     m2 = _buscar_nombre(nombre_comp)
                     if len(m2) == 1:
                         matches = m2
+                        ident = _norm(nombre_comp)
                         log_fn(f'Fila {row_num}: fallback comprobantes "{nombre_comp}" → {m2[0][2]}')
+                    elif len(m2) > 1 and _mismo_cliente(m2):
+                        matches = m2
+                        ident = _norm(nombre_comp)
+                        log_fn(f'Fila {row_num}: fallback comprobantes "{nombre_comp}" → {m2[0][2]} ({len(m2)} lotes)')
                     elif len(m2) > 1:
                         ambiguous.append({'row': row_num, 'motivo': f'CUIT {cuit_raw} en comprobantes como "{nombre_comp}"; da {len(m2)} candidatos', 'concepto': str(concepto)[:60], 'monto': monto_val, 'fecha': fecha_val, 'matches': [(n, None) for _, _, n in m2]})
                         continue
@@ -680,16 +759,33 @@ def procesar(
                 continue
 
             if len(disponibles) > 1:
-                # ¿El monto cubre la SUMA de los teóricos de los lotes sin imputar?
-                # → repartir una cuota a cada lote (cada uno con su propio teórico).
-                # No exige teóricos iguales (antes solo repartía si "empataban").
-                suma_teo = sum((t or 0) for _, _, _, t, _ in disponibles)
-                multi_tol = max(tolerance, suma_teo * MULTI_TOL_RATIO)
-                if suma_teo > 0 and abs(monto_num - suma_teo) <= multi_tol:
-                    targets = sorted(disponibles, key=lambda x: (x[0], x[1]))
+                # ¿El monto cubre la SUMA de los teóricos de N lotes sin imputar?
+                # → repartir una cuota a cada uno (cada lote con su propio teórico).
+                # Se prueba N de mayor a menor: antes solo se repartía si cubría
+                # TODOS los lotes, y bastaba un lote de más (p. ej. uno donde el
+                # CUIT figura como cofirmante y hace meses no se paga) para que
+                # el monto nunca cerrara y las N cuotas terminaran apiladas en un
+                # solo lote. Orden de preferencia: lote con pago más reciente.
+                def _recencia(x):
+                    x_cfg = cols_de(x[0], fecha_dt, sheets_cfg[x[0]])
+                    return _ultima_col_cuota(wb_deu_data[x[0]], x[1],
+                                             cuota_history_cols.get(x[0], []),
+                                             x_cfg['cuota_col'])
+
+                orden = sorted(disponibles, key=lambda x: (-_recencia(x), x[0], x[1]))
+                subset = None
+                for n in range(len(orden), 1, -1):
+                    cand = orden[:n]
+                    suma_teo = sum((t or 0) for _, _, _, t, _ in cand)
+                    multi_tol = max(tolerance, suma_teo * MULTI_TOL_RATIO)
+                    if suma_teo > 0 and abs(monto_num - suma_teo) <= multi_tol:
+                        subset = cand
+                        break
+                if subset:
+                    targets = sorted(subset, key=lambda x: (x[0], x[1]))
                     reparto_lotes = True
                 else:
-                    # No alcanza para todos los lotes (pagó una sola cuota o un
+                    # No alcanza para ningún reparto (pagó una sola cuota o un
                     # monto raro): imputar al lote cuyo teórico mejor coincide.
                     targets = [min(disponibles, key=lambda x: abs((x[3] or 0) - monto_num))]
             else:
@@ -711,8 +807,8 @@ def procesar(
 
         deu_key = (sname, srow)
         prev_assignment = written_deu_rows.get(deu_key)
-        if prev_assignment is not None and prev_assignment['cuit'] != cuit_raw:
-            ambiguous.append({'row': row_num, 'motivo': f'Destino duplicado (distinto CUIT) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
+        if prev_assignment is not None and prev_assignment['ident'] != ident:
+            ambiguous.append({'row': row_num, 'motivo': f'Destino duplicado (otro cliente) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
             continue
 
         teo_num = teo_val if isinstance(teo_val, (int, float)) else 0
@@ -809,7 +905,10 @@ def procesar(
 
         todos_matches = cuit_index.get(cuit_raw, []) or _buscar_nombre(cuit_to_nombre_previo.get(cuit_raw, ''))
         nombres_distintos = {str(n).strip().upper() for _, _, n in todos_matches}
-        usar_lote = len(todos_matches) > 1 and len(nombres_distintos) == 1
+        # Si la transferencia se reparte en varias filas de deudores hay que
+        # aclarar el lote sí o sí ("Nombre l13 c33 y l14 c23"), aunque algún
+        # lote del CUIT esté a nombre de otro titular.
+        usar_lote = (len(todos_matches) > 1 and len(nombres_distintos) == 1) or len(planes) > 1
 
         for p_sname, p_srow, p_snombre, p_teo, next_cuota, cnt, monto_lote in planes:
             p_cfg = cols_de(p_sname, fecha_dt, sheets_cfg[p_sname])
@@ -819,7 +918,7 @@ def procesar(
                 lote_str = f' l{lote_val}' if lote_val is not None else ''
             else:
                 lote_str = ''
-            written_deu_rows[(p_sname, p_srow)] = {'cuit': cuit_raw, 'last_cuota': next_cuota + cnt - 1}
+            written_deu_rows[(p_sname, p_srow)] = {'ident': ident, 'last_cuota': next_cuota + cnt - 1}
             for i in range(cnt):
                 results.append({
                     'imp_row': row_num,
