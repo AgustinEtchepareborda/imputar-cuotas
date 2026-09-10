@@ -6,7 +6,7 @@ import openpyxl
 import streamlit as st
 import pandas as pd
 
-from imputar_core import procesar, aplicar
+from imputar_core import procesar, aplicar, ultima_fila_con_datos
 from comprobantes_helper import cargar_indice
 from mep_helper import cargar_mep
 
@@ -87,7 +87,13 @@ def restaurar_cache_formulas(orig_bytes, mod_bytes):
         if ws.title not in wb_cache.sheetnames:
             continue
         ws_cache = wb_cache[ws.title]
-        for row in ws.iter_rows():
+        # Acotar a las filas con datos reales: ws.max_row puede ser 1.048.576 en
+        # hojas con formato fantasma y iter_rows() sin límite crea millones de
+        # celdas (la corrida se comía toda la RAM del server).
+        fin = ultima_fila_con_datos(ws)
+        if fin < 1:
+            continue
+        for row in ws.iter_rows(max_row=fin):
             for cell in row:
                 if isinstance(cell.value, str) and cell.value.startswith('='):
                     cached = ws_cache[cell.coordinate].value

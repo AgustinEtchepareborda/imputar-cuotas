@@ -141,6 +141,27 @@ def max_cuota_celda(val):
     return None
 
 
+def ultima_fila_con_datos(ws, cols=None):
+    """Última fila de `ws` que realmente tiene un valor (en `cols` si se pasan).
+
+    `ws.max_row` puede dar 1.048.576 en hojas con formato fantasma (celdas
+    vacías pero pintadas/con estilo). Recorrer hasta ahí con `ws.cell()` o
+    `iter_rows()` MATERIALIZA millones de celdas: una corrida USD llegaba a
+    ~7 GB de RAM y Streamlit Cloud mataba el proceso. Acá miramos las celdas
+    que openpyxl ya tiene cargadas, sin crear ninguna nueva.
+    """
+    cells = getattr(ws, '_cells', None)
+    if not cells:
+        return ws.max_row
+    if cols:
+        cols = set(cols)
+        filas = [r for (r, c), cell in cells.items()
+                 if c in cols and cell.value is not None]
+    else:
+        filas = [r for (r, c), cell in cells.items() if cell.value is not None]
+    return max(filas) if filas else 0
+
+
 def detectar_mes_transferencias(ws_imp, max_row=500):
     """Lee col A de imputaciones y retorna (year, month) más frecuente, o (None, None).
 
@@ -335,7 +356,7 @@ def build_indices(wb_deu_data, sheets_cfg):
 
     for sheet_name, cfg in sheets_cfg.items():
         ws_data = wb_deu_data[sheet_name]
-        max_row = ws_data.max_row
+        max_row = ultima_fila_con_datos(ws_data, (cfg['nombre_col'], cfg['cuit_col']))
 
         for r in range(cfg['data_start'], max_row + 1):
             nombre = ws_data.cell(r, cfg['nombre_col']).value
@@ -430,7 +451,10 @@ def build_previo(wb_imp, imp_sheet, es_usd=False):
     cuit_to_cuota_previo = {}
 
     def _indexar(ws_prev, solo_amarillas=False):
-        for row in ws_prev.iter_rows(min_row=4, max_row=ws_prev.max_row):
+        fin = ultima_fila_con_datos(ws_prev, (3, 8))  # C = concepto, H = nombre
+        if fin < 4:
+            return
+        for row in ws_prev.iter_rows(min_row=4, max_row=fin, max_col=9):
             concepto = row[2].value if len(row) > 2 else None
             col_h = row[7].value if len(row) > 7 else None
             if not concepto or not col_h:
