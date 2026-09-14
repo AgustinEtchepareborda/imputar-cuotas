@@ -927,12 +927,12 @@ def procesar(
             ambiguous.append({'row': row_num, 'motivo': error_motivo, 'cliente': snombre, 'cuit': cuit_raw, 'hoja': sname, 'hoja_fila': srow})
             continue
 
-        todos_matches = cuit_index.get(cuit_raw, []) or _buscar_nombre(cuit_to_nombre_previo.get(cuit_raw, ''))
-        nombres_distintos = {str(n).strip().upper() for _, _, n in todos_matches}
-        # Si la transferencia se reparte en varias filas de deudores hay que
-        # aclarar el lote sí o sí ("Nombre l13 c33 y l14 c23"), aunque algún
-        # lote del CUIT esté a nombre de otro titular.
-        usar_lote = (len(todos_matches) > 1 and len(nombres_distintos) == 1) or len(planes) > 1
+        # Si el cliente tiene más de un lote en deudores (por CUIT o por nombre),
+        # el label lleva siempre el lote ("Nombre l6 c13"), aunque los lotes
+        # estén a nombres distintos: sin eso no se sabe a cuál fue la cuota.
+        # Y si la transferencia se reparte en varias filas, sí o sí
+        # ("Nombre l13 c33 y l14 c23").
+        usar_lote = len(matches) > 1 or len(planes) > 1
 
         for p_sname, p_srow, p_snombre, p_teo, next_cuota, cnt, monto_lote in planes:
             p_cfg = cols_de(p_sname, fecha_dt, sheets_cfg[p_sname])
