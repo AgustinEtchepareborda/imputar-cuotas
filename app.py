@@ -2,6 +2,8 @@ import io
 import os
 import re
 import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import openpyxl
 import streamlit as st
 import pandas as pd
@@ -16,6 +18,27 @@ def cargar_mep_cacheado():
     return cargar_mep()
 
 st.set_page_config(page_title="Imputar Cuotas", page_icon="📊", layout="wide")
+
+_FECHA_EN_NOMBRE = re.compile(r'(\d{1,2})([.\-_/ ])(\d{1,2})\2(\d{4}|\d{2})')
+
+
+def nombre_con_fecha(nombre):
+    """Reemplaza la fecha que trae el nombre del archivo (17.09.26, 17-09-2026, ...)
+    por la de hoy, respetando el separador y el largo del año. Si el nombre no
+    tiene fecha, la agrega antes de la extensión."""
+    hoy = datetime.now(ZoneInfo('America/Argentina/Buenos_Aires'))
+    base, ext = os.path.splitext(nombre)
+
+    def _reemplazar(m):
+        sep = m.group(2)
+        anio = hoy.strftime('%Y') if len(m.group(4)) == 4 else hoy.strftime('%y')
+        return f"{hoy:%d}{sep}{hoy:%m}{sep}{anio}"
+
+    nuevo, n = _FECHA_EN_NOMBRE.subn(_reemplazar, base, count=1)
+    if n == 0:
+        nuevo = f"{base} {hoy:%d.%m.%y}"
+    return nuevo + ext
+
 
 CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datos', 'comprobantes_cache.json')
 
@@ -436,8 +459,8 @@ try:
             st.session_state['descarga'] = {
                 'imp_out': work_imp,
                 'deu_out': work_deu,
-                'imp_name': sim['imp_name'],
-                'deu_name': sim['deu_name'],
+                'imp_name': nombre_con_fecha(sim['imp_name']),
+                'deu_name': nombre_con_fecha(sim['deu_name']),
             }
 
     descarga = st.session_state.get('descarga')
