@@ -130,8 +130,9 @@ def max_cuota_celda(val):
     if isinstance(val, str):
         s = val.strip()
         if 'parte' in s.lower():
-            m = re.search(r'\d+', s)
-            nums = [int(m.group())] if m else []
+            # "17 y parte de c18" → 18 (la 18 quedó a medias: el próximo pago
+            # entero es la 19). Las notas entre paréntesis no cuentan.
+            nums = [int(x) for x in re.findall(r'\d+', _sin_notas(s))]
         elif re.fullmatch(r'[cC]?\s*\d+(\s*[,yY]\s*[cC]?\s*\d+)*\.?', s):
             nums = [int(x) for x in re.findall(r'\d+', s)]
         else:
@@ -277,6 +278,241 @@ def cuota_en_col_h(col_h_str):
         nums += [int(n) for n in re.findall(r'\d+', grupo)]
     nums = [n for n in nums if 0 < n <= 200]
     return max(nums) if nums else None
+
+
+# ── Partes de cuota ("parte de cN" / "completa cN") ─────────────────────────
+
+_RE_PARTE = re.compile(r'parte\s*de\s*(?:la\s*)?(?:cuota\s*)?c?\s*(\d+)', re.IGNORECASE)
+
+
+def _sin_notas(s):
+    """Saca las notas entre paréntesis: 'parte de c3(siguiente transfiere...)'."""
+    return re.sub(r'\([^)]*\)?', ' ', s)
+
+
+def cuota_parcial_de_celda(val):
+    """N de 'parte de cN' en una celda de N° de cuota, o None."""
+    if not isinstance(val, str):
+        return None
+    m = _RE_PARTE.search(_sin_notas(val))
+    return int(m.group(1)) if m else None
+
+
+def cuotas_en_celda(val):
+    """Cantidad de cuotas (enteras + la parcial) que menciona la celda."""
+    if isinstance(val, (int, float)):
+        return 1
+    if not isinstance(val, str):
+        return 0
+    return len({int(x) for x in re.findall(r'\d+', _sin_notas(val)) if 0 < int(x) <= 200})
+
+
+def texto_agregar_cuota(txt, nuevo):
+    """Agrega una cuota ('33' o 'parte de c34') a lo que ya dice la celda."""
+    if txt is None or (isinstance(txt, str) and not txt.strip()):
+        return nuevo
+    if isinstance(txt, float) and txt.is_integer():
+        txt = int(txt)
+    return f'{txt} y {nuevo}'
+
+
+def texto_completar_cuota(txt, n):
+    """'17 y parte de c18' + completar 18 → '17 y 18'; 'parte de c3(nota)' → 3."""
+    s = _sin_notas(str(txt))
+    s = re.sub(rf'parte\s*de\s*(?:la\s*)?(?:cuota\s*)?c?\s*{n}\b', str(n), s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return int(s) if s.isdigit() else s
+
+
+def _fmt_num(x):
+    x = float(x)
+    return str(int(x)) if x.is_integer() else f'{x:.2f}'
+
+
+def normalizar_telefono(raw):
+    """Primer teléfono de la celda en formato wa.me (549 + área + número), o None.
+
+    La col TELEFONO viene en mil formatos: '2995 88-4296', '+54 9 11 6606-2102',
+    '2984634923 / 2984967634', '2284 45-9353 (Erica) y 2284 46-5461 (Oscar)'.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, float) and raw.is_integer():
+        raw = int(raw)
+    primero = re.split(r'/|\by\b|\(|,', str(raw))[0]
+    d = re.sub(r'\D', '', primero)
+    if d.startswith('54'):
+        d = d[2:]
+    if d.startswith('9') and len(d) == 11:
+        d = d[1:]
+    if d.startswith('0'):
+        d = d[1:]
+    return '549' + d if len(d) == 10 else None
+
+
+def _pesos(x):
+    return '$' + f'{round(x):,}'.replace(',', '.')
+
+
+def mensaje_reclamo(nombre, fecha, monto, n_cuota, saldo, teo, info, otras=None):
+    """Texto del reclamo por WhatsApp de una cuota que quedó incompleta."""
+    nombre = re.sub(r'\s+', ' ', str(nombre)).strip().title()
+    fecha_txt = fecha.strftime('%d/%m') if fecha else ''
+    msg = f'Hola {nombre}! Recibimos tu transferencia del {fecha_txt} por {_pesos(monto)}.'
+    if info and not info.get('congelado', True):
+        msg += (f' Como se hizo después del día 10, la cuota {n_cuota} quedó en {_pesos(teo)}'
+                f' (bolsa de {info["kg"]} kg a {_pesos(info["precio_bolsa"])}).')
+    elif teo:
+        msg += f' La cuota {n_cuota} es de {_pesos(teo)}.'
+    msg += f' Para completarla te faltan {_pesos(saldo)}.'
+    otras = [(n, sd) for n, sd in (otras or []) if n != n_cuota]
+    if otras:
+        detalle = ', '.join(f'{_pesos(sd)} de la cuota {n}' for n, sd in otras)
+        total = saldo + sum(sd for _, sd in otras)
+        msg += f' Además quedaron pendientes {detalle} (total a completar: {_pesos(total)}).'
+    msg += ' ¡Muchas gracias!'
+    return msg
+
+
+def link_whatsapp(telefono, mensaje):
+    from urllib.parse import quote
+    if not telefono:
+        return None
+    return f'https://wa.me/{telefono}?text={quote(mensaje)}'
+
+
+# ── Lectura de valores de deudores ───────────────────────────────────────────
+
+_RE_REF_CELDA = re.compile(r'\$?\b([A-Z]{1,3})\$?(\d+)\b')
+_RE_ARITMETICA = re.compile(r'^[\d.\s+\-*/()eE]+$')
+
+
+class LectorDeudores:
+    """Valor numérico de una celda de deudores.
+
+    Usa el valor cacheado por Excel; si no está (el archivo lo guardó openpyxl,
+    p. ej. la salida de una corrida anterior), evalúa la fórmula si es
+    aritmética simple con referencias (=U7*EX$2, =S7/T7, =497000+6000).
+    Fórmulas con funciones (SUM, IF...) o referencias rotas devuelven None.
+    """
+
+    def __init__(self, wb_valores, wb_formulas):
+        self.wb_v = wb_valores
+        self.wb_f = wb_formulas
+        self._memo = {}
+
+    def formula(self, sname, row, col):
+        return self.wb_f[sname].cell(row, col).value
+
+    def valor(self, sname, row, col, _prof=0):
+        key = (sname, row, col)
+        if key in self._memo:
+            return self._memo[key]
+        v = self.wb_v[sname].cell(row, col).value
+        if not (isinstance(v, (int, float)) and not isinstance(v, bool)):
+            f = self.formula(sname, row, col)
+            if isinstance(f, (int, float)) and not isinstance(f, bool):
+                v = f
+            elif isinstance(f, str) and f.startswith('=') and _prof < 10:
+                v = self._evaluar(sname, f[1:], _prof)
+            else:
+                v = None
+        self._memo[key] = v
+        return v
+
+    def _evaluar(self, sname, cuerpo, prof):
+        from openpyxl.utils import column_index_from_string
+        faltan = []
+
+        def _ref(m):
+            val = self.valor(sname, int(m.group(2)), column_index_from_string(m.group(1)), prof + 1)
+            if val is None:
+                faltan.append(m.group(0))
+                return '0'
+            return repr(float(val))
+
+        expr = _RE_REF_CELDA.sub(_ref, cuerpo)
+        if faltan or not _RE_ARITMETICA.match(expr):
+            return None
+        try:
+            return float(eval(expr, {'__builtins__': {}}, {}))
+        except Exception:
+            return None
+
+
+# ── BOLSA CEMENTO: precio por tramo de fecha ─────────────────────────────────
+
+HOJA_BOLSA = 'BOLSA CEMENTO'
+UMBRAL_CUOTA_DEL_MES = 0.9   # pago ≥ 90% del teórico = la cuota del mes pagada de menos (no completa partes viejas)
+# El precio se congela hasta el 10, pero una transferencia del 10 que cae en
+# finde/feriado aparece acreditada el 12 o 13: hasta el 13 se toma congelado.
+DIA_TOPE_CONGELADO = 13
+MESES_PARTE = 3   # meses hacia atrás donde se buscan partes de cuota pendientes
+FIRMA_BOLSA_50K_HASTA = datetime.datetime(2025, 8, 31)   # contratos con bolsa de 50 kg
+
+
+def _header_es_del_mes(hn, year, month):
+    palabras = re.findall(r'[a-z]+', hn)
+    if not any(w.startswith(t) for w in palabras for t in _MES_TOKENS[month]):
+        return False
+    return str(year) in hn or re.search(rf'\b{year % 100:02d}\b', hn) is not None
+
+
+def detectar_tramos_bolsa(lector, ws_f, year, month):
+    """Precios de la bolsa (25 kg) del mes según el día de pago.
+
+    Lee los encabezados de la fila 1 ('B CEMENTO LOMA NEGRA 25 K 1 AL 10 DE
+    SEPT 2026', '... 10 al 15 ...', '... desde el 16 ...') y el precio de la
+    fila 2. Ignora las columnas 'los q firmaron hasta agosto 2025' (son el
+    mismo precio ×2). Devuelve {'tramos': [(dia_hasta, precio)], 'desc': coef}
+    o None si el mes no tiene tramos cargados.
+    """
+    tramos, desc = [], 1.0
+    for c in range(1, ws_f.max_column + 1):
+        h = ws_f.cell(1, c).value
+        if not isinstance(h, str):
+            continue
+        hn = _norm(h)
+        if not _header_es_del_mes(hn, year, month):
+            continue
+        if 'desc' in hn:
+            v = lector.valor(HOJA_BOLSA, 2, c)
+            if v and 0 < v < 1:
+                desc = v
+            continue
+        if 'firmaron' in hn:
+            continue
+        m = re.search(r'desde\s+el\s+(\d+)', hn)
+        if m:
+            hasta = 31
+        else:
+            m = re.search(r'(\d+)\s+al\s+(\d+)', hn)
+            if not m:
+                continue
+            hasta = int(m.group(2))
+        precio = lector.valor(HOJA_BOLSA, 2, c)
+        if precio:
+            tramos.append((hasta, precio))
+    if not tramos:
+        return None
+    return {'tramos': sorted(tramos), 'desc': desc}
+
+
+def precio_tramo(tramos_info, dia):
+    """(precio 25 kg, texto del tramo) que corresponde al día de pago.
+
+    El primer tramo (precio congelado) se estira hasta DIA_TOPE_CONGELADO."""
+    primero_hasta, primero_precio = tramos_info['tramos'][0]
+    if dia <= max(primero_hasta, DIA_TOPE_CONGELADO):
+        return primero_precio, f'congelado (hasta el {primero_hasta})'
+    desde = 1
+    for hasta, precio in tramos_info['tramos']:
+        if dia <= hasta:
+            txt = f'del {desde} al {hasta}' if hasta < 31 else f'desde el {desde}'
+            return precio, txt
+        desde = hasta + 1
+    hasta, precio = tramos_info['tramos'][-1]
+    return precio, f'desde el {desde}'
 
 
 def _mismo_cliente(matches):
@@ -503,9 +739,27 @@ def procesar(
     log_fn=None,
     solo_mes=None,
     forzar_col_mes=None,
+    reclamos_out=None,
+    reprocesar_pago_menos=False,
+    telefonos_extra=None,
+    tramos_bolsa_override=None,
 ):
     """
     Corre la imputación en modo simulación.
+
+    Pesos — pagos incompletos (ver CLAUDE.md, "Partes de cuota"):
+      * paga menos que el teórico por más de la tolerancia → "parte de cN"
+        (antes: "PAGO MENOS"). Si tiene una parte pendiente, primero la completa.
+      * paga la cuota entera → cuota siguiente, sin mirar partes pendientes.
+      * paga de más y el sobrante alcanza para completar una parte pendiente →
+        "cX y completa cN".
+    reclamos_out: lista opcional donde se agregan los reclamos de WhatsApp
+    (solo BOLSA CEMENTO) de las cuotas que quedan incompletas.
+    reprocesar_pago_menos: vuelve a procesar filas marcadas "PAGO MENOS".
+    telefonos_extra: dict CUIT → teléfono (p. ej. de Supabase); gana sobre la
+    col TELEFONO de deudores.
+    tramos_bolsa_override: {'tramos': [(dia_hasta, precio_25k), ...], 'desc': 1.0}
+    para corregir los precios del mes si los encabezados no se pueden leer.
 
     solo_mes: tupla (year, month) opcional. Si se pasa, se procesan SOLO las
     transferencias fechadas en ese mes y se escribe en la columna de ese mes.
@@ -537,7 +791,9 @@ def procesar(
 
     # Solo data_only para leer — no cargamos el workbook editable acá
     wb_deu_data = openpyxl.load_workbook(io.BytesIO(deu_bytes), data_only=True)
+    wb_deu_f = openpyxl.load_workbook(io.BytesIO(deu_bytes))  # fórmulas crudas
     wb_imp = openpyxl.load_workbook(io.BytesIO(imp_bytes))
+    lector = LectorDeudores(wb_deu_data, wb_deu_f)
 
     if solo_mes:
         tx_year, tx_month = solo_mes
@@ -562,6 +818,145 @@ def procesar(
         if usd_cfgs:
             usd_cuit_index, _, usd_hist_cols = build_indices(wb_deu_data, usd_cfgs)
             log_fn(f'{len(usd_cuit_index)} CUITs indexados en USD fijo')
+
+    # ── BOLSA CEMENTO: teórico = bolsas/mes × precio del tramo del día de pago
+    tramos_bolsa, bolsa_cols = None, {}
+    if HOJA_BOLSA in sheets_cfg and tx_year:
+        ws_bf = wb_deu_f[HOJA_BOLSA]
+        hr_b = sheets_cfg[HOJA_BOLSA]['header_row']
+        tramos_bolsa = tramos_bolsa_override or detectar_tramos_bolsa(lector, ws_bf, tx_year, tx_month)
+        bolsa_cols = {
+            'bolsas_mes': _col_por_header(ws_bf, hr_b, ('bolsas por mes',)),
+            'fecha_firma': _col_por_header(ws_bf, hr_b, ('fecha firma',)),
+            'firmaron': {c for c in range(1, ws_bf.max_column + 1)
+                         if isinstance(ws_bf.cell(1, c).value, str)
+                         and 'firmaron' in _norm(ws_bf.cell(1, c).value)},
+        }
+        if tramos_bolsa:
+            txt = ', '.join(f'hasta el {h}: ${p:,.0f}' for h, p in tramos_bolsa['tramos'])
+            log_fn(f'Bolsa cemento {MESES_ES[tx_month]}: {txt} (bolsa 25 kg; ×2 si firmó hasta ago-2025)')
+        else:
+            log_fn('Bolsa cemento: no se encontraron los precios por tramo del mes → se usa el teórico de la planilla')
+
+    def bolsa_doble(srow, teo_col):
+        """True si el contrato es de bolsa de 50 kg (firmó hasta agosto 2025).
+
+        Primero mira a qué columna de precio apunta la fórmula del teórico (lo
+        que decidió la oficina); si no se puede, la fecha de firma."""
+        from openpyxl.utils import column_index_from_string
+        f = lector.formula(HOJA_BOLSA, srow, teo_col)
+        if isinstance(f, str) and f.startswith('='):
+            refs = {column_index_from_string(m.group(1))
+                    for m in _RE_REF_CELDA.finditer(f) if m.group(2) == '2'}
+            if refs:
+                return bool(refs & bolsa_cols['firmaron'])
+        fc = bolsa_cols.get('fecha_firma')
+        ff = parse_date(wb_deu_data[HOJA_BOLSA].cell(srow, fc).value) if fc else None
+        return bool(ff and ff <= FIRMA_BOLSA_50K_HASTA)
+
+    def teo_de(sname, srow, teo_col, fecha):
+        """(teórico, info) de una fila. En BOLSA CEMENTO y el mes en curso se
+        calcula con el precio del tramo de `fecha`; si no, el de la planilla."""
+        if (sname == HOJA_BOLSA and tramos_bolsa and bolsa_cols.get('bolsas_mes')
+                and teo_col == sheets_cfg[HOJA_BOLSA]['teo_col']):
+            bolsas = lector.valor(sname, srow, bolsa_cols['bolsas_mes'])
+            if bolsas:
+                if fecha is None:
+                    dia = 31
+                elif (fecha.year, fecha.month) == (tx_year, tx_month):
+                    dia = fecha.day
+                else:
+                    dia = 1 if (fecha.year, fecha.month) < (tx_year, tx_month) else 31
+                precio, tramo = precio_tramo(tramos_bolsa, dia)
+                doble = bolsa_doble(srow, teo_col)
+                precio_bolsa = precio * (2 if doble else 1)
+                teo = round(bolsas * precio_bolsa * tramos_bolsa['desc'])
+                return teo, {'dia': dia, 'tramo': tramo,
+                             'congelado': precio == tramos_bolsa['tramos'][0][1], 'precio_bolsa': precio_bolsa,
+                             'kg': 50 if doble else 25, 'bolsas': bolsas}
+        return lector.valor(sname, srow, teo_col), None
+
+    # ── Bloques (teórico, real, N° cuota, fecha) que toca esta corrida
+    estado_bloques = {}
+
+    def bloque(sname, srow, cuota_col):
+        k = (sname, srow, cuota_col)
+        if k not in estado_bloques:
+            txt = wb_deu_data[sname].cell(srow, cuota_col).value
+            estado_bloques[k] = {
+                'base': wb_deu_f[sname].cell(srow, cuota_col - 1).value,
+                'sumas': [],
+                'txt': txt,
+                'fecha': parse_date(wb_deu_data[sname].cell(srow, cuota_col + 1).value),
+                'fecha_nueva': None,
+            }
+        return estado_bloques[k]
+
+    def bloque_vacio(b):
+        return b['base'] in (None, '') and not b['sumas'] and b['txt'] in (None, '')
+
+    def pagado(sname, srow, cuota_col):
+        b = bloque(sname, srow, cuota_col)
+        base = lector.valor(sname, srow, cuota_col - 1) if b['base'] not in (None, '') else 0
+        return (base or 0) + sum(b['sumas'])
+
+    def pendientes(sname, srow):
+        """Cuotas 'parte de cN' con saldo, de los últimos MESES_PARTE meses
+        (más vieja primero). El saldo se calcula con el teórico del mes de la
+        parte (en BOLSA, al precio del día del primer pago)."""
+        cfg_p = sheets_cfg[sname]
+        cols = [c for c in cuota_history_cols.get(sname, []) if c <= cfg_p['cuota_col']][-MESES_PARTE:]
+        out = []
+        for c in cols:
+            b = bloque(sname, srow, c)
+            n = cuota_parcial_de_celda(b['txt'])
+            if n is None:
+                continue
+            teo_p, info_p = teo_de(sname, srow, c - 2, b['fecha'])
+            if not teo_p:
+                continue
+            saldo = cuotas_en_celda(b['txt']) * teo_p - pagado(sname, srow, c)
+            if saldo > tolerance:
+                out.append({'col': c, 'n': n, 'saldo': round(saldo), 'teo': teo_p, 'info': info_p})
+        return out
+
+    def max_cuota_fila(sname, srow):
+        mx = None
+        for hc in cuota_history_cols.get(sname, []):
+            k = (sname, srow, hc)
+            val = estado_bloques[k]['txt'] if k in estado_bloques else wb_deu_data[sname].cell(srow, hc).value
+            n = max_cuota_celda(val)
+            if n is not None and (mx is None or n > mx):
+                mx = n
+        return mx
+
+    def snapshot(sname, srow, cuota_col):
+        """Valores finales a escribir en un bloque tocado."""
+        b = estado_bloques[(sname, srow, cuota_col)]
+        partes = []
+        base = b['base']
+        if isinstance(base, str) and base.startswith('='):
+            partes.append(base[1:])
+        elif isinstance(base, (int, float)):
+            partes.append(_fmt_num(base))
+        partes += [_fmt_num(x) for x in b['sumas']]
+        if len(partes) == 1 and not isinstance(base, str):
+            real_val = b['sumas'][0] if b['sumas'] else base
+        else:
+            real_val = '=' + '+'.join(partes)
+        txt = b['txt']
+        max_ent = None
+        if isinstance(txt, str):
+            n_parc = cuota_parcial_de_celda(txt)
+            enteras = [int(x) for x in re.findall(r'\d+', _sin_notas(txt)) if int(x) != n_parc]
+            max_ent = max(enteras) if enteras else None
+        return {'hoja': sname, 'fila': srow, 'real_col': cuota_col - 1, 'cuota_col': cuota_col,
+                'fecha_col': cuota_col + 1, 'real': real_val, 'cuota': txt,
+                'fecha': b['fecha_nueva'], 'max_cuota': max_ent}
+
+    col_tel = {}
+    for s_n, s_cfg in sheets_cfg.items():
+        col_tel[s_n] = _col_por_header(wb_deu_f[s_n], s_cfg['header_row'], ('telefono',))
 
     cuit_to_nombre_previo, cuit_to_cuota_previo = build_previo(wb_imp, imp_sheet, es_usd)
     log_fn(f'{len(cuit_to_nombre_previo)} CUITs con nombre desde hojas anteriores')
@@ -632,7 +1027,9 @@ def procesar(
             if not (fecha_dt and fecha_dt.year == solo_mes[0] and fecha_dt.month == solo_mes[1]):
                 continue
 
-        if col_h_val and ('PAGO MENOS' in str(col_h_val) or 'Saldo Disponible' in str(col_h_val)):
+        if col_h_val and 'Saldo Disponible' in str(col_h_val):
+            continue
+        if col_h_val and 'PAGO MENOS' in str(col_h_val) and not reprocesar_pago_menos:
             continue
 
         cuit_raw = extract_cuit_from_concepto(concepto)
@@ -768,21 +1165,34 @@ def procesar(
             for (sname, srow, snombre) in matches:
                 cfg = cols_de(sname, fecha_dt, sheets_cfg[sname])
                 ws_d = wb_deu_data[sname]
-                teo = ws_d.cell(srow, cfg['teo_col']).value
-                real = ws_d.cell(srow, cfg['real_col']).value
+                teo, _ = teo_de(sname, srow, cfg['teo_col'], fecha_dt)
+                real = wb_deu_f[sname].cell(srow, cfg['real_col']).value
+                # Un lote con "parte de cN" en el mes sigue disponible (en pesos)
+                if not es_usd and cuota_parcial_de_celda(ws_d.cell(srow, cfg['cuota_col']).value) is not None:
+                    real = None
                 candidatos.append((sname, srow, snombre, teo, real))
 
             sin_imputar = [(s, r, n, t, rv) for s, r, n, t, rv in candidatos if rv is None]
-            if not sin_imputar:
+            disponibles = [x for x in sin_imputar if (x[0], x[1]) not in written_deu_rows]
+            # Ningún lote libre, pero alguno tiene una parte pendiente (de la
+            # planilla o de esta misma corrida): el pago puede ser para
+            # completarla (se decide abajo).
+            con_pend = [] if (disponibles or es_usd) else [
+                (x, pendientes(x[0], x[1])) for x in candidatos]
+            con_pend = [(x, pe) for x, pe in con_pend if pe]
+            if con_pend:
+                x, _pe = min(con_pend, key=lambda xp: abs(xp[1][0]['saldo'] - monto_num))
+                targets = [x]
+            elif not sin_imputar:
                 ambiguous.append({'row': row_num, 'motivo': 'Todos los matches ya tienen el mes imputado', 'cuit': cuit_raw, 'monto': monto_val, 'matches': [(n, t) for _, _, n, t, _ in candidatos]})
                 continue
 
-            disponibles = [x for x in sin_imputar if (x[0], x[1]) not in written_deu_rows]
-            if not disponibles:
+            if con_pend:
+                pass
+            elif not disponibles:
                 ambiguous.append({'row': row_num, 'motivo': 'Todos los lotes ya asignados en este run', 'cuit': cuit_raw, 'monto': monto_val, 'matches': [(n, t) for _, _, n, t, _ in sin_imputar]})
                 continue
-
-            if len(disponibles) > 1:
+            elif len(disponibles) > 1:
                 # ¿El monto cubre la SUMA de los teóricos de N lotes sin imputar?
                 # → repartir una cuota a cada uno (cada lote con su propio teórico).
                 # Se prueba N de mayor a menor: antes solo se repartía si cubría
@@ -818,14 +1228,25 @@ def procesar(
             sname, srow, snombre = matches[0]
             cfg = cols_de(sname, fecha_dt, sheets_cfg[sname])
             ws_d = wb_deu_data[sname]
-            teo = ws_d.cell(srow, cfg['teo_col']).value
-            real = ws_d.cell(srow, cfg['real_col']).value
+            teo, _ = teo_de(sname, srow, cfg['teo_col'], fecha_dt)
+            real = wb_deu_f[sname].cell(srow, cfg['real_col']).value
+            if not es_usd and cuota_parcial_de_celda(ws_d.cell(srow, cfg['cuota_col']).value) is not None:
+                real = None
             targets = [(sname, srow, snombre, teo, real)]
 
         sname, srow, snombre, teo_val, real_existente = targets[0]
         cfg = sheets_cfg[sname]
 
-        if real_existente is not None:
+        # Pesos (un solo lote destino): lógica de partes de cuota
+        modo_partes = not es_usd and not reparto_lotes
+        if modo_partes:
+            b_act = bloque(sname, srow, cfg['cuota_col'])
+            ya_imputado = real_existente is not None
+            pend = pendientes(sname, srow)
+            if ya_imputado and not pend:
+                ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
+                continue
+        elif real_existente is not None:
             ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
             continue
 
@@ -853,6 +1274,159 @@ def procesar(
                 ambiguous.append({'row': row_num, 'motivo': f'Teórico del mes vacío o 0 en {sname} fila {srow} (¿fórmula sin calcular / coeficiente del mes sin cargar?). NO imputado — revisar teórico y reimputar', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
                 continue
 
+        n_cuotas_partes = None
+        if modo_partes:
+            # ¿Cuota entera, parte de cuota, o completa una parte pendiente?
+            #  - entera (±tolerancia) o múltiplo → cuota(s) siguiente(s), sin
+            #    mirar partes pendientes (no "roba" plata de la cuota nueva).
+            #  - menos → completa partes pendientes (más vieja primero) y lo que
+            #    sobra queda como "parte de" la cuota siguiente.
+            #  - más → si el sobrante alcanza para completar una parte pendiente,
+            #    la completa; si no, imputa normal (o PAGO MAS si es mucho).
+            m = monto_num
+            dif = m - teo_num
+            n_mult = 1
+            if dif > tolerance:
+                n = round(m / teo_num)
+                if n >= 2 and abs(m - n * teo_num) <= max(tolerance, teo_num * MULTI_TOL_RATIO):
+                    n_mult = n
+            completar, acumular, parte_nueva, enteras = [], None, None, 0
+            resto = m
+            if abs(dif) <= tolerance or n_mult >= 2:
+                enteras = n_mult
+            elif dif < 0 and (not pend or (
+                    m > sum(p['saldo'] for p in pend) + tolerance
+                    and m >= teo_num * UMBRAL_CUOTA_DEL_MES)):
+                # Es la cuota del mes pagada de menos (típico: pagó con el
+                # precio congelado después del 10): no completa partes viejas.
+                # Si el pago no pasa de lo que debe de partes anteriores, sí
+                # va a completarlas (rama de abajo).
+                parte_nueva = m
+            elif dif < 0:
+                for p in pend:
+                    if resto >= p['saldo'] - tolerance:
+                        completar.append(p)
+                        resto -= p['saldo']
+                    else:
+                        acumular = p
+                        break
+                if acumular is None and resto > tolerance:
+                    parte_nueva = resto
+            else:
+                sobrante = dif
+                for p in pend:
+                    if sobrante >= p['saldo'] - tolerance:
+                        completar.append(p)
+                        sobrante -= p['saldo']
+                    else:
+                        break
+                if not completar and dif > EXCESO_LIMITE:
+                    pago_mas.append({'row': row_num, 'cliente': snombre, 'cuit': cuit_raw, 'transferido': monto_num, 'teorico': round(teo_num), 'diferencia': round(dif)})
+                    continue
+                enteras = 1
+
+            if enteras and ya_imputado:
+                ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
+                continue
+
+            if not (completar or acumular or parte_nueva is not None) and bloque_vacio(b_act):
+                # Cuota(s) entera(s) en un mes vacío: camino de siempre
+                n_cuotas_partes = enteras
+            else:
+                x_max = max_cuota_fila(sname, srow)
+                if x_max is None:
+                    x_max = cuit_to_cuota_previo.get(cuit_raw)
+                if x_max is None and cuit_raw in cuota_override:
+                    x_max = cuota_override[cuit_raw] - 1
+                if x_max is None and (enteras or parte_nueva is not None):
+                    ambiguous.append({'row': row_num, 'motivo': 'No se pudo determinar número de cuota (sin historial)', 'cliente': snombre, 'cuit': cuit_raw, 'hoja': sname, 'hoja_fila': srow})
+                    continue
+                x_sig = (x_max or 0) + 1
+
+                piezas, tocados, apuntes = [], [], []
+
+                def _anotar(col, monto):
+                    b = bloque(sname, srow, col)
+                    if bloque_vacio(b):
+                        b['fecha_nueva'] = fecha_dt
+                        b['fecha'] = fecha_dt
+                    b['sumas'].append(monto)
+                    apuntes.append(b)
+                    if col not in tocados:
+                        tocados.append(col)
+                    return b
+
+                if enteras:
+                    cuotas_ent = list(range(x_sig, x_sig + enteras))
+                    b = _anotar(cfg['cuota_col'], m - sum(p['saldo'] for p in completar))
+                    for c_n in cuotas_ent:
+                        b['txt'] = texto_agregar_cuota(b['txt'], c_n)
+                    piezas.append(f'c{_format_cuotas(cuotas_ent)}')
+                for p in completar:
+                    b = _anotar(p['col'], p['saldo'])
+                    b['txt'] = texto_completar_cuota(b['txt'], p['n'])
+                    if piezas and piezas[-1].startswith('completa '):
+                        piezas[-1] += f" y c{p['n']}"
+                    else:
+                        piezas.append(f"completa c{p['n']}")
+                reclamo = None
+                completadas = {p['col'] for p in completar}
+                if acumular is not None:
+                    _anotar(acumular['col'], resto)
+                    piezas.append(f"parte de c{acumular['n']}")
+                    reclamo = (acumular['n'], acumular['saldo'] - resto, acumular['teo'], acumular['info'])
+                    completadas.add(acumular['col'])
+                if parte_nueva is not None:
+                    b = _anotar(cfg['cuota_col'], parte_nueva)
+                    b['txt'] = texto_agregar_cuota(b['txt'], f'parte de c{x_sig}')
+                    piezas.append(f'parte de c{x_sig}')
+                    _, info_act = teo_de(sname, srow, cfg['teo_col'], fecha_dt)
+                    reclamo = (x_sig, teo_num - parte_nueva, teo_num, info_act)
+                # otras partes que siguen abiertas (se mencionan en el reclamo)
+                otras_pend = [(p['n'], p['saldo']) for p in pend if p['col'] not in completadas]
+                # Redondeo: lo que no se asignó (dentro de la tolerancia) va al
+                # último apunte, así la suma de "pago real" da lo transferido.
+                if not enteras:
+                    resto_sin_asignar = m - sum(p['saldo'] for p in completar) - (resto if acumular is not None else 0) - (parte_nueva or 0)
+                    if resto_sin_asignar:
+                        apuntes[-1]['sumas'][-1] += resto_sin_asignar
+
+                usar_lote_p = len(matches) > 1
+                lote_val = wb_deu_data[sname].cell(srow, cfg['lote_col']).value if usar_lote_p else None
+                lote_str_p = f' l{lote_val}' if lote_val is not None else ''
+                written_deu_rows[(sname, srow)] = {'ident': ident, 'last_cuota': max_cuota_fila(sname, srow) or x_sig}
+                results.append({
+                    'imp_row': row_num,
+                    'cuit': cuit_raw,
+                    'cliente': snombre,
+                    'lote_str': lote_str_p,
+                    'hoja': sname,
+                    'hoja_fila': srow,
+                    'monto_real': m,
+                    'monto_teo': round(teo_num),
+                    'diferencia': round(m - teo_num),
+                    'cuota': ' y '.join(piezas),
+                    'fecha': fecha_dt,
+                    'etiqueta': piezas,
+                    'bloques': [snapshot(sname, srow, c) for c in tocados],
+                })
+                if reclamo and reclamo[1] > tolerance and sname == HOJA_BOLSA and reclamos_out is not None:
+                    n_r, saldo_r, teo_r, info_r = reclamo
+                    tel_raw = wb_deu_data[sname].cell(srow, col_tel[sname]).value if col_tel.get(sname) else None
+                    tel = (telefonos_extra or {}).get(cuit_raw) or normalizar_telefono(tel_raw)
+                    msg = mensaje_reclamo(snombre, fecha_dt, m, n_r, saldo_r, teo_r, info_r, otras_pend)
+                    reclamos_out.append({
+                        'imp_row': row_num, 'cliente': snombre, 'cuit': cuit_raw,
+                        'hoja_fila': srow, 'cuota': n_r, 'transferido': m,
+                        'teorico': round(teo_r), 'saldo': round(saldo_r),
+                        'saldo_total': round(saldo_r + sum(sd for _, sd in otras_pend)),
+                        'fecha': fecha_dt, 'tramo': (info_r or {}).get('tramo'),
+                        'telefono_planilla': tel_raw, 'telefono': tel,
+                        'mensaje': msg,
+                        'whatsapp': link_whatsapp(tel, msg),
+                    })
+                continue
+
         if reparto_lotes:
             # Una cuota a cada lote; cada lote lleva su propio teórico como pago real.
             usar = targets
@@ -867,7 +1441,9 @@ def procesar(
             # Exceso positivo: verificar si es múltiplo del teórico o excede el límite.
             # (Solo aplica a UN lote: el reparto entre lotes ya se decidió arriba.)
             n_cuotas = 1
-            if teo_num > 0 and monto_num > teo_num + tolerance:
+            if n_cuotas_partes is not None:
+                n_cuotas = n_cuotas_partes   # ya decidido arriba (pesos)
+            elif teo_num > 0 and monto_num > teo_num + tolerance:
                 exceso = monto_num - teo_num
                 n = round(monto_num / teo_num)
                 multi_tol = max(tolerance, teo_num * MULTI_TOL_RATIO)
@@ -895,9 +1471,9 @@ def procesar(
                 # Mismo cliente, misma fila deudores → cuota siguiente
                 next_cuota = prev['last_cuota'] + 1
             elif isinstance(cuota_col_val, str) and 'parte' in cuota_col_val.lower():
-                m = re.search(r'\d+', cuota_col_val)
-                if m:
-                    next_cuota = int(m.group()) + 1
+                n_parte = max_cuota_celda(cuota_col_val)
+                if n_parte is not None:
+                    next_cuota = n_parte + 1
                 else:
                     error_motivo = f'Cuota dice "parte de..." pero no se pudo extraer número ({cuota_col_val!r})'
                     break
@@ -943,6 +1519,14 @@ def procesar(
             else:
                 lote_str = ''
             written_deu_rows[(p_sname, p_srow)] = {'ident': ident, 'last_cuota': next_cuota + cnt - 1}
+            if not es_usd:
+                b_n = bloque(p_sname, p_srow, p_cfg['cuota_col'])
+                if bloque_vacio(b_n):
+                    b_n['fecha_nueva'] = fecha_dt
+                    b_n['fecha'] = fecha_dt
+                b_n['sumas'].append(monto_lote * cnt)
+                for i in range(cnt):
+                    b_n['txt'] = texto_agregar_cuota(b_n['txt'], next_cuota + i)
             for i in range(cnt):
                 results.append({
                     'imp_row': row_num,
@@ -962,6 +1546,7 @@ def procesar(
                 })
 
     wb_deu_data.close()
+    wb_deu_f.close()
     wb_imp.close()
 
     # incluir la cfg de USD fijo para que aplicar() pueda escribir ahí
@@ -1016,6 +1601,11 @@ def aplicar(results, pago_menos, imp_bytes, deu_bytes, imp_sheet, sheets_cfg, pa
             cell.value = s['nombre']
 
     # Imputaciones: agrupar por imp_row (una transferencia puede cubrir N cuotas)
+    # Las de partes de cuota ("parte de c33", "completa c32") traen su label y
+    # los valores finales de cada bloque ya calculados: se escriben al final.
+    con_partes = [r for r in results if r.get('etiqueta')]
+    results = [r for r in results if not r.get('etiqueta')]
+
     imp_groups = defaultdict(list)
     for r in results:
         imp_groups[r['imp_row']].append(r)
@@ -1083,6 +1673,23 @@ def aplicar(results, pago_menos, imp_bytes, deu_bytes, imp_sheet, sheets_cfg, pa
         # más alta directo en esa columna, pisando la fórmula/valor previo.
         if len(cuotas) > 1:
             _set_cell(ws_deu.cell(srow, cfg['max_cuota_col']), max(cuotas))
+
+    # Partes de cuota. En orden: si un bloque se tocó varias veces en la corrida,
+    # el último snapshot ya trae el acumulado (incluidas las cuotas enteras).
+    for r in con_partes:
+        label = f"{str(r['cliente'])[:38]}{r['lote_str']} " + ' y '.join(r['etiqueta'])
+        ws_edit.cell(r['imp_row'], 8).value = label
+        for cell in ws_edit[r['imp_row']]:
+            cell.fill = YELLOW_FILL
+        for b in r['bloques']:
+            cfg = sheets_cfg[b['hoja']]
+            ws_deu = wb_deu_edit[b['hoja']]
+            _set_cell(ws_deu.cell(b['fila'], b['real_col']), b['real'])
+            _set_cell(ws_deu.cell(b['fila'], b['cuota_col']), b['cuota'])
+            if b['fecha'] is not None:
+                _set_cell(ws_deu.cell(b['fila'], b['fecha_col']), b['fecha'])
+            if b['max_cuota'] is not None:
+                _set_cell(ws_deu.cell(b['fila'], cfg['max_cuota_col']), b['max_cuota'])
 
     imp_out = io.BytesIO()
     deu_out = io.BytesIO()

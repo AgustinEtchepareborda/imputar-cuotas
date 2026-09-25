@@ -58,7 +58,7 @@ Hojas con cuotas en pesos (NO escribir en '$ USD fijo' desde el script pesos):
 |------|-----------|------------|----------|-----------|
 | INDICE CAC | fila 5 | fila 6 | L (12) | I (9) |
 | INDICE CAC M. OBRA | fila 3 | fila 4 | K (11) | I (9) |
-| BOLSA CEMENTO | fila 3 | fila 4 | N (14) | J (10) |
+| BOLSA CEMENTO | fila 3 | fila 4 | M (13) | I (9) |
 
 **Columnas de pago**: auto-detectadas por el script buscando "MES AÑO teorico" en los headers. Las 4 columnas (teorico, real, N° cuota, fecha) son siempre consecutivas a partir de ahí.
 
@@ -72,7 +72,7 @@ CUITs (en cualquier hoja) pueden tener formato con guiones (`20-11111111-2`), m�
 
 En cambio, el script:
 1. Lee la columna "NUMERO DE CUOTA" del **mes actual** en la fila del cliente:
-   - Si dice `"parte de cuota X"` → imputa como `X+1` (el cliente pagó parte de X, ahora completa)
+   - Si dice `"parte de cX"` → la próxima cuota entera es `X+1` (en pesos, un pago chico puede ir a completar X: ver "Partes de cuota")
    - Si es un número normal → ya está imputado este mes, no volver a imputar
 2. Si está vacía, escanea **todas las columnas históricas** "NUMERO DE CUOTA" (meses anteriores) en la misma fila y toma el máximo + 1
 3. Si no hay historial en deudores, busca en las últimas hojas de imputaciones (semanas previas) la cuota imputada para ese CUIT
@@ -108,14 +108,43 @@ Cada hoja semanal ("S 121", "USD 5", etc.) tiene:
 
 ## Reglas de negocio
 
-- Solo procesar filas NO amarillas y sin "PAGO MENOS" en col H
+- Solo procesar filas NO amarillas y sin "PAGO MENOS" en col H (salvo `reprocesar_pago_menos`)
 - Identificar cliente por CUIT/CUIL extraído del campo Concepto
 - Si no hay CUIT extraíble → reportar como ambiguo
-- Si pagó MENOS y diferencia > $3.000 (pesos) o > U$D 5 (USD) → escribir "PAGO MENOS" en col H
-- Si pagó menos pero diferencia ≤ tolerancia → imputar normalmente
+- **Pesos**: si pagó MENOS y diferencia > tolerancia ($3.000) → "parte de cN" (ver "Partes de cuota")
+- **USD**: si pagó MENOS y diferencia > U$D 5 → escribir "PAGO MENOS" en col H
+- Si pagó menos pero diferencia ≤ tolerancia → imputar normalmente (cuota entera)
 - Si pagó más → imputar normalmente
 - Si ya fue imputado este mes → reportar como ambiguo (no sobreescribir)
 - Al imputar: escribir en col H `{nombre} [l{lote}] c{cuota}`, en col I `x`, pintar fila amarilla
+
+## BOLSA CEMENTO: teórico por tramo de fecha
+
+El precio de la bolsa se congela del 1 al 10 de cada mes; después sube (sept-26: 1–10 $8.300, 11–15 $8.390, 16+ $8.490). La oficina cambiaba a mano la fórmula del teórico de cada fila según el día de pago. El script calcula el teórico él mismo:
+
+`teórico = BOLSAS POR MES (col U) × precio del tramo del día de la transferencia × 2 si es bolsa de 50 kg`
+
+- Tramos: encabezados de la **fila 1** del mes (`... 1 AL 10 DE SEPT 2026`, `... 10 al 15 ...`, `... desde el 16 ...`), precio en la **fila 2**. Se ignoran las columnas `los q firmaron hasta agosto 2025` (son el mismo precio ×2). Un `DESC <MES> 26` en fila 1 aplica como coeficiente. En la app se pueden sobreescribir (`10: 8300, 15: 8390, 31: 8490`).
+- El tramo congelado se estira hasta el **día 13** (`DIA_TOPE_CONGELADO`): una transferencia del 10 que cae en finde/feriado aparece acreditada el 12 o 13. El mensaje de reclamo igual dice "después del día 10".
+- Bolsa de 50 kg (×2): si la fórmula del teórico de la fila apunta a una columna "firmaron hasta agosto 2025"; si no se puede, fecha firma (col K) ≤ 31/08/2025.
+- Otros meses / otras hojas: teórico de la planilla. Si el archivo no trae valores cacheados (lo guardó openpyxl), `LectorDeudores` evalúa las fórmulas aritméticas simples (`=U7*EX$2`, `=S7/T7`, `=497000+6000`).
+
+## Partes de cuota (solo pesos)
+
+Formato igual al que usa la oficina a mano. Col H: `Nombre parte de c33`, `Nombre completa c32`, `Nombre completa c5 y c6`, `Nombre c14 y completa c13`. Deudores: el "pago real" se va sumando como fórmula (`=330000+9600`), N° cuota `parte de c33` → al completarse `33` (o `32 y parte de c33`), la fecha queda la del **primer** pago (sirve para calcular el saldo al precio de ese día).
+
+Una parte pendiente = celda "N° cuota" con `parte de cN` en los últimos 3 meses (`MESES_PARTE`) con saldo > tolerancia. Saldo = (cuotas que menciona la celda × teórico de ese mes) − pagado. Si se completa en un mes posterior, se suma en la columna del mes **de la parte**.
+
+Criterio (acordado con el usuario): *si el monto parece la cuota del mes, es la cuota del mes; si no, se cancela primero lo más viejo.*
+
+Qué hace con cada transferencia (un lote destino):
+1. **Cuota entera** (±tolerancia) o múltiplo → cuota(s) siguiente(s) `X+1`, **sin mirar partes pendientes** (X = mayor cuota mencionada, incluidas las parciales).
+2. **Paga de menos**:
+   - sin partes pendientes, o el pago es ≥ 90% del teórico (`UMBRAL_CUOTA_DEL_MES`) y supera lo adeudado → `parte de cX+1` (la cuota del mes pagada de menos, típico: precio congelado pagado después del 10).
+   - si no → completa partes pendientes (la más vieja primero); si no alcanza, acumula en esa parte; lo que sobra queda `parte de cX+1`.
+3. **Paga de más**: si el sobrante alcanza para completar partes pendientes → `cX+1 y completa cN`; si no, como siempre (normal si ≤ $50.000, si no "PAGO MAS").
+
+**Reclamo por WhatsApp** (solo BOLSA CEMENTO): cada cuota que queda incompleta genera un mensaje con el saldo (y las otras partes abiertas) y un link `wa.me` al teléfono de la col TELEFONO (normalizado a `549…`; `telefonos_extra` permite pasarle teléfonos de otra fuente, p. ej. Supabase).
 
 ## Para cambiar de mes
 
