@@ -78,6 +78,13 @@ def parse_cuota_override(texto):
                 pass
     return resultado
 
+def parse_tramos_bolsa(texto):
+    """'10: 8300, 15: 8390, 31: 8490' → {'tramos': [(10, 8300), ...], 'desc': 1.0}."""
+    tramos = []
+    for dia, precio in re.findall(r'(\d+)\s*:\s*([\d.]+)', texto or ''):
+        tramos.append((int(dia), float(precio.replace('.', ''))))
+    return {'tramos': sorted(tramos), 'desc': 1.0} if tramos else None
+
 def fmt_monto(val, es_usd):
     if val is None:
         return ''
@@ -190,6 +197,18 @@ try:
 
     cuota_override = parse_cuota_override(override_text)
 
+    with st.expander('Bolsa cemento: precios del mes (opcional)'):
+        st.caption('Por defecto se leen de la fila 1-2 de BOLSA CEMENTO (tramos "1 al 10", '
+                   '"10 al 15", "desde el 16"). Completá solo si hay que corregirlos: '
+                   '`día hasta: precio bolsa 25 kg`, ej. `10: 8300, 15: 8390, 31: 8490`. '
+                   'Los que firmaron hasta ago-2025 pagan el doble (bolsa de 50 kg).')
+        tramos_text = st.text_input('Tramos', value='', label_visibility='collapsed')
+    tramos_override = parse_tramos_bolsa(tramos_text)
+
+    reprocesar_pm = st.checkbox(
+        'Reprocesar filas marcadas "PAGO MENOS"', value=False,
+        help='Las vuelve a pasar con la regla nueva ("parte de cN") en vez de saltearlas.')
+
     st.divider()
 
     # ── Simular ───────────────────────────────────────────────────────────────
@@ -218,6 +237,7 @@ try:
                 es_usd = es_hoja_usd(hoja)
                 tol = int(tol_usd if es_usd else tol_pesos)
                 logs = []
+                reclamos = []
                 results, pago_menos, pago_mas, ambiguous, sin_fila, usd_en_pesos, mes_info, sheets_cfg = procesar(
                     imp_bytes=read_imp,
                     deu_bytes=read_deu,
@@ -229,6 +249,9 @@ try:
                     comprobantes_cache=comprobantes_cache,
                     mep_rates=mep_rates,
                     log_fn=logs.append,
+                    reclamos_out=reclamos,
+                    reprocesar_pago_menos=reprocesar_pm,
+                    tramos_bolsa_override=tramos_override,
                 )
                 passes.append({
                     'hoja': hoja,
@@ -242,6 +265,7 @@ try:
                     'mes_info': mes_info,
                     'sheets_cfg': sheets_cfg,
                     'logs': logs,
+                    'reclamos': reclamos,
                 })
                 # Preparar los bytes de lectura para la próxima hoja (si hay).
                 if i < len(orden) - 1:
@@ -401,6 +425,33 @@ try:
                     'Diferencia': fmt_dif(pm['diferencia'], es_usd_sim),
                 })
             st.dataframe(pd.DataFrame(rows_pmas), use_container_width=True, hide_index=True)
+
+        reclamos = p.get('reclamos') or []
+        if reclamos:
+            st.subheader(f'📲 Reclamos por WhatsApp — BOLSA CEMENTO ({len(reclamos)})')
+            st.caption('Cuotas que quedan como "parte de cN". El botón abre WhatsApp con el '
+                       'mensaje ya escrito. Sin teléfono válido en la planilla: copiá el mensaje.')
+            rows_rec = []
+            for rc in reclamos:
+                rows_rec.append({
+                    'Fila': rc['imp_row'],
+                    'Cliente': str(rc['cliente']).strip(),
+                    'Cuota': rc['cuota'],
+                    'Pagó': fmt_monto(rc['transferido'], False),
+                    'Teórico': fmt_monto(rc['teorico'], False),
+                    'Falta': fmt_monto(rc['saldo_total'], False),
+                    'Tramo': rc['tramo'] or '',
+                    'Teléfono': rc['telefono'] or f"⚠️ {rc['telefono_planilla'] or 'sin teléfono'}",
+                    'WhatsApp': rc['whatsapp'],
+                    'Mensaje': rc['mensaje'],
+                })
+            st.dataframe(
+                pd.DataFrame(rows_rec), use_container_width=True, hide_index=True,
+                column_config={
+                    'WhatsApp': st.column_config.LinkColumn('WhatsApp', display_text='📲 Reclamar'),
+                    'Mensaje': st.column_config.TextColumn('Mensaje', width='large'),
+                },
+            )
 
         if ambiguous:
             st.subheader(f'❌ Casos ambiguos ({len(ambiguous)}) — revisar manualmente')
