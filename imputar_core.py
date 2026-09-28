@@ -363,19 +363,18 @@ def _pesos(x):
 def mensaje_reclamo(nombre, fecha, monto, n_cuota, saldo, teo, info, otras=None):
     """Texto del reclamo por WhatsApp de una cuota que quedó incompleta."""
     fecha_txt = fecha.strftime('%d/%m') if fecha else ''
-    msg = f'Hola, buen día! Recibimos tu transferencia del {fecha_txt} por {_pesos(monto)}.'
+    msg = f'Hola buen dia. Recibimos tu transferencia del {fecha_txt} por {_pesos(monto)}.'
     if info and not info.get('congelado', True):
         msg += (f' Como se hizo después del día 10, la cuota {n_cuota} quedó en {_pesos(teo)}'
                 f' (bolsa de {info["kg"]} kg a {_pesos(info["precio_bolsa"])}).')
     elif teo:
         msg += f' La cuota {n_cuota} es de {_pesos(teo)}.'
-    msg += f' Para completarla te faltan {_pesos(saldo)}.'
+    msg += f' Para completarla te faltarian {_pesos(saldo)}.'
     otras = [(n, sd) for n, sd in (otras or []) if n != n_cuota]
     if otras:
         detalle = ', '.join(f'{_pesos(sd)} de la cuota {n}' for n, sd in otras)
         total = saldo + sum(sd for _, sd in otras)
         msg += f' Además quedaron pendientes {detalle} (total a completar: {_pesos(total)}).'
-    msg += ' ¡Muchas gracias!'
     return msg
 
 
