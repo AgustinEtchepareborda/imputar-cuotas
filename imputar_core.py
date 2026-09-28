@@ -324,6 +324,12 @@ def texto_completar_cuota(txt, n):
     return int(s) if s.isdigit() else s
 
 
+def texto_descompletar_cuota(txt, n):
+    """'6' → 'parte de c6'; '5 y 6' → '5 y parte de c6'."""
+    s = _fmt_num(txt) if isinstance(txt, (int, float)) else str(txt)
+    return re.sub(rf'(?<!\d)(?:[cC]\s*)?{n}(?!\d)', f'parte de c{n}', s, count=1)
+
+
 def _fmt_num(x):
     x = float(x)
     return str(int(x)) if x.is_integer() else f'{x:.2f}'
@@ -447,7 +453,7 @@ UMBRAL_CUOTA_DEL_MES = 0.9   # pago ≥ 90% del teórico = la cuota del mes paga
 # finde/feriado aparece acreditada el 12 o 13: hasta el 13 se toma congelado.
 DIA_TOPE_CONGELADO = 13
 MESES_PARTE = 3   # meses hacia atrás donde se buscan partes de cuota pendientes
-SALDO_EXACTO_TOL = 500   # un pago chico igual (±$500) a lo que le faltó a una cuota anotada entera la completa
+SALDO_EXACTO_TOL = 500   # un pago igual (±$500) a lo que le faltó a una cuota anotada entera la completa
 FIRMA_BOLSA_50K_HASTA = datetime.datetime(2025, 8, 31)   # contratos con bolsa de 50 kg
 
 
@@ -900,14 +906,15 @@ def procesar(
         base = lector.valor(sname, srow, cuota_col - 1) if b['base'] not in (None, '') else 0
         return (base or 0) + sum(b['sumas'])
 
-    def pendientes(sname, srow, monto=None):
+    def pendientes(sname, srow, monto=None, teo_mes=None):
         """Cuotas 'parte de cN' con saldo, de los últimos MESES_PARTE meses
         (más vieja primero). El saldo se calcula con el teórico del mes de la
         parte (en BOLSA, al precio del día del primer pago).
 
-        Con `monto`: también una cuota anotada como entera ('16') pero pagada
-        de menos, si `monto` es justo lo que le falta (la oficina la imputó
-        entera y el cliente después manda la diferencia)."""
+        Con `monto`: también las cuotas anotadas como enteras ('16') pero
+        pagadas de menos (la oficina las imputó enteras y el cliente después
+        manda la diferencia), si `monto` no parece la cuota del mes (< 90% de
+        `teo_mes`) o es justo lo que le falta a una."""
         cfg_p = sheets_cfg[sname]
         cols = [c for c in cuota_history_cols.get(sname, []) if c <= cfg_p['cuota_col']][-MESES_PARTE:]
         out = []
@@ -925,7 +932,12 @@ def procesar(
                 continue
             saldo = cuotas_en_celda(b['txt']) * teo_p - pagado(sname, srow, c)
             if cuota_parcial_de_celda(b['txt']) is None:
-                if saldo > SALDO_EXACTO_TOL and abs(saldo - monto) <= SALDO_EXACTO_TOL:
+                exacto = saldo > SALDO_EXACTO_TOL and abs(saldo - monto) <= SALDO_EXACTO_TOL
+                # solo si le falta poco (≤ 10% del teórico): diferencias más
+                # grandes en cuotas anotadas enteras las aceptó la oficina
+                chico = (tolerance < saldo <= teo_p * (1 - UMBRAL_CUOTA_DEL_MES)
+                         and bool(teo_mes) and monto < teo_mes * UMBRAL_CUOTA_DEL_MES)
+                if exacto or chico:
                     out.append({'col': c, 'n': n, 'saldo': round(saldo), 'teo': teo_p, 'info': info_p, 'implicita': True})
             elif saldo > tolerance:
                 out.append({'col': c, 'n': n, 'saldo': round(saldo), 'teo': teo_p, 'info': info_p})
@@ -1190,7 +1202,7 @@ def procesar(
             # planilla o de esta misma corrida): el pago puede ser para
             # completarla (se decide abajo).
             con_pend = [] if (disponibles or es_usd) else [
-                (x, pendientes(x[0], x[1], monto_num)) for x in candidatos]
+                (x, pendientes(x[0], x[1], monto_num, x[3] if isinstance(x[3], (int, float)) else None)) for x in candidatos]
             con_pend = [(x, pe) for x, pe in con_pend if pe]
             if con_pend:
                 x, _pe = min(con_pend, key=lambda xp: abs(xp[1][0]['saldo'] - monto_num))
@@ -1254,7 +1266,7 @@ def procesar(
         if modo_partes:
             b_act = bloque(sname, srow, cfg['cuota_col'])
             ya_imputado = real_existente is not None
-            pend = pendientes(sname, srow, monto_num)
+            pend = pendientes(sname, srow, monto_num, teo_val if isinstance(teo_val, (int, float)) else None)
             if ya_imputado and not pend:
                 ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
                 continue
@@ -1384,7 +1396,10 @@ def procesar(
                 reclamo = None
                 completadas = {p['col'] for p in completar}
                 if acumular is not None:
-                    _anotar(acumular['col'], resto)
+                    b = _anotar(acumular['col'], resto)
+                    if acumular.get('implicita'):
+                        # estaba anotada entera: pasa a "parte de cN" (queda pendiente)
+                        b['txt'] = texto_descompletar_cuota(b['txt'], acumular['n'])
                     piezas.append(f"parte de c{acumular['n']}")
                     reclamo = (acumular['n'], acumular['saldo'] - resto, acumular['teo'], acumular['info'])
                     completadas.add(acumular['col'])
