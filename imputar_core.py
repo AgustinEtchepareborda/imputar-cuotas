@@ -1429,7 +1429,7 @@ def procesar(
                     msg = mensaje_reclamo(snombre, fecha_dt, m, n_r, saldo_r, teo_r, info_r, otras_pend)
                     reclamos_out.append({
                         'imp_row': row_num, 'cliente': snombre, 'cuit': cuit_raw,
-                        'hoja_fila': srow, 'cuota': n_r, 'transferido': m,
+                        'hoja': sname, 'hoja_fila': srow, 'cuota': n_r, 'transferido': m,
                         'teorico': round(teo_r), 'saldo': round(saldo_r),
                         'saldo_total': round(saldo_r + sum(sd for _, sd in otras_pend)),
                         'fecha': fecha_dt, 'tramo': (info_r or {}).get('tramo'),
@@ -1556,6 +1556,19 @@ def procesar(
                     'cuota_col': p_cfg['cuota_col'],
                     'fecha_col': p_cfg['fecha_col'],
                 })
+
+    # Reclamos: si en la misma corrida llegó otro pago para esa cuota (p. ej.
+    # pagó de menos y a los días mandó la diferencia), vale solo el último
+    # reclamo, y ninguno si la cuota quedó completa.
+    if reclamos_out:
+        ultimo = {}
+        for rc in reclamos_out:
+            ultimo[(rc['hoja'], rc['hoja_fila'], rc['cuota'])] = rc
+        vigentes = []
+        for (h, f, n), rc in ultimo.items():
+            if any(p['n'] == n for p in pendientes(h, f)):
+                vigentes.append(rc)
+        reclamos_out[:] = sorted(vigentes, key=lambda rc: rc['imp_row'])
 
     wb_deu_data.close()
     wb_deu_f.close()

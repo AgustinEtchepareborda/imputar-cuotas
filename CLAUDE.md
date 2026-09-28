@@ -144,7 +144,7 @@ Qué hace con cada transferencia (un lote destino):
    - si no → completa partes pendientes (la más vieja primero); si no alcanza, acumula en esa parte; lo que sobra queda `parte de cX+1`.
 3. **Paga de más**: si el sobrante alcanza para completar partes pendientes → `cX+1 y completa cN`; si no, como siempre (normal si ≤ $50.000, si no "PAGO MAS").
 
-**Reclamo por WhatsApp** (solo BOLSA CEMENTO): cada cuota que queda incompleta genera un mensaje con el saldo (y las otras partes abiertas) y un link `wa.me` al teléfono de la col TELEFONO (normalizado a `549…`; `telefonos_extra` permite pasarle teléfonos de otra fuente, p. ej. Supabase).
+**Reclamo por WhatsApp** (solo BOLSA CEMENTO): cada cuota que queda incompleta **al final de la corrida** genera un mensaje (si en la misma semana mandó la diferencia, no hay reclamo; si hubo varios pagos parciales, vale el último) con el saldo (y las otras partes abiertas) y un link `wa.me` al teléfono de la col TELEFONO (normalizado a `549…`; `telefonos_extra` permite pasarle teléfonos de otra fuente, p. ej. Supabase).
 
 ## Para cambiar de mes
 
