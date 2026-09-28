@@ -447,6 +447,7 @@ UMBRAL_CUOTA_DEL_MES = 0.9   # pago ≥ 90% del teórico = la cuota del mes paga
 # finde/feriado aparece acreditada el 12 o 13: hasta el 13 se toma congelado.
 DIA_TOPE_CONGELADO = 13
 MESES_PARTE = 3   # meses hacia atrás donde se buscan partes de cuota pendientes
+SALDO_EXACTO_TOL = 500   # un pago chico igual (±$500) a lo que le faltó a una cuota anotada entera la completa
 FIRMA_BOLSA_50K_HASTA = datetime.datetime(2025, 8, 31)   # contratos con bolsa de 50 kg
 
 
@@ -899,23 +900,34 @@ def procesar(
         base = lector.valor(sname, srow, cuota_col - 1) if b['base'] not in (None, '') else 0
         return (base or 0) + sum(b['sumas'])
 
-    def pendientes(sname, srow):
+    def pendientes(sname, srow, monto=None):
         """Cuotas 'parte de cN' con saldo, de los últimos MESES_PARTE meses
         (más vieja primero). El saldo se calcula con el teórico del mes de la
-        parte (en BOLSA, al precio del día del primer pago)."""
+        parte (en BOLSA, al precio del día del primer pago).
+
+        Con `monto`: también una cuota anotada como entera ('16') pero pagada
+        de menos, si `monto` es justo lo que le falta (la oficina la imputó
+        entera y el cliente después manda la diferencia)."""
         cfg_p = sheets_cfg[sname]
         cols = [c for c in cuota_history_cols.get(sname, []) if c <= cfg_p['cuota_col']][-MESES_PARTE:]
         out = []
         for c in cols:
             b = bloque(sname, srow, c)
             n = cuota_parcial_de_celda(b['txt'])
-            if n is None:
+            if n is None and monto is None:
                 continue
+            if n is None:
+                n = max_cuota_celda(b['txt'])
+                if n is None or b['fecha'] is None:
+                    continue
             teo_p, info_p = teo_de(sname, srow, c - 2, b['fecha'])
             if not teo_p:
                 continue
             saldo = cuotas_en_celda(b['txt']) * teo_p - pagado(sname, srow, c)
-            if saldo > tolerance:
+            if cuota_parcial_de_celda(b['txt']) is None:
+                if saldo > SALDO_EXACTO_TOL and abs(saldo - monto) <= SALDO_EXACTO_TOL:
+                    out.append({'col': c, 'n': n, 'saldo': round(saldo), 'teo': teo_p, 'info': info_p, 'implicita': True})
+            elif saldo > tolerance:
                 out.append({'col': c, 'n': n, 'saldo': round(saldo), 'teo': teo_p, 'info': info_p})
         return out
 
@@ -1060,7 +1072,8 @@ def procesar(
             tasa, tasa_fecha = mep_para_fecha(mep_rates or {}, fecha_dt) if fecha_dt else (None, None)
 
             monto_num = monto_val if isinstance(monto_val, (int, float)) else 0
-            teo_usd = wb_deu_data[u_sname].cell(u_srow, u_cfg['teo_col']).value
+            # el teórico suele ser fórmula (=S180) sin valor cacheado → evaluarla
+            teo_usd = lector.valor(u_sname, u_srow, u_cfg['teo_col'])
             teo_usd = teo_usd if isinstance(teo_usd, (int, float)) else None
             equiv = round(monto_num / tasa, 2) if (tasa and monto_num) else None
             dif = round(equiv - teo_usd, 2) if (equiv is not None and teo_usd is not None) else None
@@ -1177,7 +1190,7 @@ def procesar(
             # planilla o de esta misma corrida): el pago puede ser para
             # completarla (se decide abajo).
             con_pend = [] if (disponibles or es_usd) else [
-                (x, pendientes(x[0], x[1])) for x in candidatos]
+                (x, pendientes(x[0], x[1], monto_num)) for x in candidatos]
             con_pend = [(x, pe) for x, pe in con_pend if pe]
             if con_pend:
                 x, _pe = min(con_pend, key=lambda xp: abs(xp[1][0]['saldo'] - monto_num))
@@ -1241,7 +1254,7 @@ def procesar(
         if modo_partes:
             b_act = bloque(sname, srow, cfg['cuota_col'])
             ya_imputado = real_existente is not None
-            pend = pendientes(sname, srow)
+            pend = pendientes(sname, srow, monto_num)
             if ya_imputado and not pend:
                 ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
                 continue
