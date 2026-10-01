@@ -1025,6 +1025,39 @@ def procesar(
     EXCESO_LIMITE   = 50 if es_usd else 50_000   # exceso máximo para imputar normalmente
     MULTI_TOL_RATIO = 0.05                        # tolerancia proporcional para múltiplos
 
+    def n_cuotas_enteras(monto, teo):
+        """Cuántas cuotas enteras de `teo` son `monto` (±tolerancia), o 0."""
+        if not isinstance(teo, (int, float)) or teo <= 0:
+            return 0
+        if abs(monto - teo) <= tolerance:
+            return 1
+        n = round(monto / teo)
+        if n >= 2 and abs(monto - n * teo) <= max(tolerance, teo * MULTI_TOL_RATIO):
+            return n
+        return 0
+
+    mapas_mes = {}
+
+    def mes_siguiente(sname, srow, monto):
+        """(cfg, teórico) de la columna del mes siguiente al de la corrida, si
+        está vacía y `monto` es su teórico (±tolerancia); si no, None."""
+        if not tx_year or not tx_month:
+            return None
+        if sname not in mapas_mes:
+            mapas_mes[sname] = mapa_meses_columnas(wb_deu_data[sname], sheets_cfg[sname]['header_row'])
+        y, m = (tx_year + 1, 1) if tx_month == 12 else (tx_year, tx_month + 1)
+        teo_col = mapas_mes[sname].get((y, m))
+        if teo_col is None:
+            return None
+        cfg_sig = dict(sheets_cfg[sname])
+        cfg_sig.update(teo_col=teo_col, real_col=teo_col + 1, cuota_col=teo_col + 2, fecha_col=teo_col + 3)
+        if not bloque_vacio(bloque(sname, srow, cfg_sig['cuota_col'])):
+            return None
+        teo_sig = lector.valor(sname, srow, teo_col)
+        if not isinstance(teo_sig, (int, float)) or teo_sig <= 0 or abs(monto - teo_sig) > tolerance:
+            return None
+        return cfg_sig, teo_sig
+
     for row in ws_imp.iter_rows(min_row=4, max_row=max_row):
         fecha_val = row[0].value
         monto_val = row[5].value
@@ -1261,10 +1294,34 @@ def procesar(
         if modo_partes:
             b_act = bloque(sname, srow, cfg['cuota_col'])
             ya_imputado = real_existente is not None
+            al_mes_siguiente = False
+            misma = False
             pend = pendientes(sname, srow, monto_num, teo_val if isinstance(teo_val, (int, float)) else None)
-            if ya_imputado and not pend:
-                ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
-                continue
+            if ya_imputado:
+                # El mes ya tiene su cuota: si el monto es el teórico del mes
+                # SIGUIENTE (típico: paga a fin de mes la cuota que viene), va a
+                # esa columna. Si no, y es la cuota del mes (o un múltiplo), se
+                # suma al mes actual como cuota(s) siguiente(s) ("21 y 22").
+                # Salvo que sea ESTA misma transferencia ya cargada a mano: la
+                # oficina a veces la imputa en deudores y escribe col H sin
+                # pintar la fila; tomarla como cuota nueva la duplicaría.
+                misma = bool(col_h_val and str(col_h_val).strip()) or (
+                    b_act['fecha'] is not None and fecha_dt is not None
+                    and b_act['fecha'].date() == fecha_dt.date()
+                    and abs(pagado(sname, srow, cfg['cuota_col']) - monto_num) <= 1)
+                sig = None if misma else mes_siguiente(sname, srow, monto_num)
+                if misma and not pend:
+                    ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
+                    continue
+                if sig is not None:
+                    cfg, teo_val = sig
+                    real_existente, ya_imputado = None, False
+                    al_mes_siguiente = True
+                    b_act = bloque(sname, srow, cfg['cuota_col'])
+                    log_fn(f'Fila {row_num}: mes ya imputado y el monto es el teórico del mes siguiente → {sname} fila {srow}, columna del mes siguiente')
+                elif not pend and not n_cuotas_enteras(monto_num, teo_val):
+                    ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
+                    continue
         elif real_existente is not None:
             ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
             continue
@@ -1344,12 +1401,14 @@ def procesar(
                     continue
                 enteras = 1
 
-            if enteras and ya_imputado:
+            if enteras and ya_imputado and misma:
                 ambiguous.append({'row': row_num, 'motivo': f'Mes ya imputado ({real_existente}) en {sname} fila {srow}', 'cliente': snombre, 'cuit': cuit_raw, 'monto': monto_val})
                 continue
 
-            if not (completar or acumular or parte_nueva is not None) and bloque_vacio(b_act):
-                # Cuota(s) entera(s) en un mes vacío: camino de siempre
+            if (not (completar or acumular or parte_nueva is not None) and bloque_vacio(b_act)
+                    and not al_mes_siguiente):
+                # Cuota(s) entera(s) en un mes vacío: camino de siempre (el mes
+                # siguiente va por abajo: ese camino escribe en el mes de la corrida)
                 n_cuotas_partes = enteras
             else:
                 x_max = max_cuota_fila(sname, srow)

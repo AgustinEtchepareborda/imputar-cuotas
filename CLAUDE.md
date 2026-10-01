@@ -115,7 +115,7 @@ Cada hoja semanal ("S 121", "USD 5", etc.) tiene:
 - **USD**: si pagó MENOS y diferencia > U$D 5 → escribir "PAGO MENOS" en col H
 - Si pagó menos pero diferencia ≤ tolerancia → imputar normalmente (cuota entera)
 - Si pagó más → imputar normalmente
-- Si ya fue imputado este mes → reportar como ambiguo (no sobreescribir)
+- Si ya fue imputado este mes (pesos, un lote): si el monto es el teórico del **mes siguiente** y esa columna está vacía → va al mes siguiente (cuota X+1; típico: paga a fin de mes la cuota que viene). Si no, y es la cuota del mes (o múltiplo) → se suma al mes actual (`=365200+373560`, `21 y 22`). Si no coincide con ninguno → ambiguo. Nunca si la fila ya tiene col H o si el pago del mes en deudores es esta misma transferencia (misma fecha y monto: la oficina la cargó sin pintar la fila)
 - Al imputar: escribir en col H `{nombre} [l{lote}] c{cuota}`, en col I `x`, pintar fila amarilla
 
 ## BOLSA CEMENTO: teórico por tramo de fecha
