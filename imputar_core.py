@@ -194,25 +194,21 @@ def detectar_columnas_mes(ws, header_row, year=None, month=None):
     """
     Retorna la columna 'teorico' para el mes/año indicado.
     Si year/month son None o no hay match, retorna la más a la derecha (fallback).
-    """
-    mes_nombre = _norm(MESES_ES.get(month, '')) if month else None
-    yr_str = str(year % 100) if year else None       # "26" para 2026
-    yr_full = str(year) if year else None             # "2026"
 
-    teo_col_match = None
+    El mes se reconoce también abreviado ("pago SEPT. 26 teorico"): buscar solo
+    el nombre completo hacía caer al fallback (el mes siguiente) y se imputaba
+    con el teórico de octubre una transferencia de septiembre.
+    """
     teo_col_fallback = None
     for c in range(1, ws.max_column + 1):
         h = ws.cell(header_row, c).value
-        if not h:
-            continue
-        h_norm = _norm(str(h))
-        if 'teorico' not in h_norm:
-            continue
-        teo_col_fallback = c
-        if mes_nombre and yr_str and mes_nombre in h_norm:
-            if yr_str in h_norm or (yr_full and yr_full in h_norm):
-                teo_col_match = c
-    return teo_col_match if teo_col_match is not None else teo_col_fallback
+        if h and 'teorico' in _norm(str(h)):
+            teo_col_fallback = c
+    if year and month:
+        teo_col_match = mapa_meses_columnas(ws, header_row).get((year, month))
+        if teo_col_match is not None:
+            return teo_col_match
+    return teo_col_fallback
 
 
 # Tokens (nombre completo + abreviaturas) para reconocer el mes en un header.
