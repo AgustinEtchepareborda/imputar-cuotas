@@ -16,3 +16,17 @@ __pycache__/
 # Claude Code (herramienta de desarrollo, no parte del proyecto)
 .claude/
 xlsx/
+
+# Datos reales en cualquier carpeta (el repo es público)
+*.xlsx
+*.xls
+*.csv
+*.pdf
+logs-*.txt
+COMPROBANTES CUOTAS/
+~$*
+
+# Scripts sueltos de uso local (tienen CUITs/nombres reales)
+_*.py
+diagnostico_*.py
+prompt_outlook_*.md

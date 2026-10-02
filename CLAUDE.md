@@ -19,6 +19,16 @@ comprobantes_helper.py         ← módulo de acceso al cache de comprobantes
 exportar_comprobantes.py       ← refresca el cache desde Google Sheets
 ```
 
+## ⚠️ El repo es PÚBLICO: nada de datos reales
+
+Todo lo que se commitea queda visible en GitHub (y en el historial aunque después se borre). **Nunca** subir:
+
+- Planillas, exports o caches (`*.xlsx`, `*.csv`, `*.pdf`, `*.json` de datos, logs de la app): van en `datos/` o fuera del repo, ignorados por `.gitignore`.
+- Datos de clientes **ni siquiera como ejemplo** en código, docstrings, tests, comentarios, mensajes de commit o este archivo: nombres, CUIT/DNI, teléfonos, mails, números de cuenta, lotes con nombre, montos de transferencias concretas.
+- Credenciales, tokens, IDs de Google Sheets o Supabase: van en variables de entorno o `.streamlit/secrets.toml`.
+
+Para ejemplos usar datos inventados y obvios: CUIT `20-11111111-2`, teléfono `2990001111`, nombre `Apellido Nombre`. Antes de commitear, revisar el diff buscando datos copiados de las planillas. Si algo se filtró: sacarlo, reescribir el historial y hacer force push (ya pasó con teléfonos en un docstring, oct-2026).
+
 ## Cache de comprobantes (Google Sheets)
 
 El sheet "Datos comprobantes" (su ID se configura en la variable de entorno `COMPROBANTES_SHEET_ID`) tiene los datos de clientes que mandaron comprobantes al bot. Se usa como fallback adicional cuando el CUIT no se encuentra en deudores ni en hojas anteriores de imputaciones.
