@@ -20,6 +20,7 @@ xlsx/
 # Datos reales en cualquier carpeta (el repo es público)
 *.xlsx
 *.xls
+*.bak
 *.csv
 *.pdf
 logs-*.txt
