@@ -3,6 +3,8 @@ datos/*.xlsx
 datos/*.bak
 datos/comprobantes_cache.json
 datos/mep_cache.json
+datos/*.html
+reclamos_*.html
 
 # Python
 __pycache__/
