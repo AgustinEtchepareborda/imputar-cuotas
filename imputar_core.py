@@ -549,6 +549,24 @@ def _col_por_header(ws, header_row, keywords):
     return None
 
 
+def detectar_header_row(ws, base_hr, max_filas=15):
+    """Fila de encabezados: la que tiene 'teorico' y 'cuit' en algún header.
+
+    La oficina a veces inserta filas arriba (p. ej. un precio nuevo de la bolsa)
+    y el encabezado se corre: con la fila fija la hoja entera se salteaba y
+    todos sus clientes salían 'no encontrado en deudores'. Prefiere `base_hr`
+    si sigue siendo válida."""
+    def es_header(r):
+        hs = [_norm(str(v)) for v in (ws.cell(r, c).value for c in range(1, ws.max_column + 1)) if v]
+        return any('teorico' in h for h in hs) and any('cuit' in h for h in hs)
+    if es_header(base_hr):
+        return base_hr
+    for r in range(1, max_filas + 1):
+        if r != base_hr and es_header(r):
+            return r
+    return base_hr
+
+
 def build_sheets_cfg(wb_deu_data, sheets_base, year=None, month=None):
     """Auto-detecta columnas del mes y construye sheets_cfg completo."""
     sheets_cfg = {}
@@ -558,6 +576,11 @@ def build_sheets_cfg(wb_deu_data, sheets_base, year=None, month=None):
             ws = wb_deu_data[sheet_name]
         except KeyError:
             continue
+        base = dict(base)
+        hr_det = detectar_header_row(ws, base['header_row'])
+        if hr_det != base['header_row']:
+            base['data_start'] += hr_det - base['header_row']
+            base['header_row'] = hr_det
         teo_col = detectar_columnas_mes(ws, base['header_row'], year=year, month=month)
         if teo_col is None:
             continue
