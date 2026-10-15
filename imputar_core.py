@@ -511,7 +511,10 @@ def detectar_tramos_bolsa(lector, ws_f, year, month, header_row=3):
             hn = _norm(h)
             if 'firmaron' in hn:
                 continue
-            es_tramo = re.search(r'desde\s+el\s+\d+|\d+\s+al\s+\d+', hn)
+            # 'desde el 16 DE SEPT 2026 - monto 15/10/2026': tramo de septiembre,
+            # precio por día de octubre
+            es_tramo = (re.search(r'desde\s+el\s+\d+|\d+\s+al\s+\d+', hn)
+                        and _header_es_del_mes(hn, year, month))
             dias = [] if es_tramo else _dias_monto_bolsa(hn, year, month)
             if dias:
                 precio = lector.valor(HOJA_BOLSA, r + 1, c)
