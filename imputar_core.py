@@ -360,7 +360,10 @@ def mensaje_reclamo(nombre, fecha, monto, n_cuota, saldo, teo, info, otras=None)
     """Texto del reclamo por WhatsApp de una cuota que quedó incompleta."""
     fecha_txt = fecha.strftime('%d/%m') if fecha else ''
     msg = f'Hola buen dia. Recibimos tu transferencia del {fecha_txt} por {_pesos(monto)}.'
-    if info and not info.get('congelado', True):
+    if info and info.get('por_dia'):
+        msg += (f' Con el precio de la bolsa del día {fecha_txt}, la cuota {n_cuota} quedó en {_pesos(teo)}'
+                f' (bolsa de {info["kg"]} kg a {_pesos(info["precio_bolsa"])}).')
+    elif info and not info.get('congelado', True):
         msg += (f' Como se hizo después del día 10, la cuota {n_cuota} quedó en {_pesos(teo)}'
                 f' (bolsa de {info["kg"]} kg a {_pesos(info["precio_bolsa"])}).')
     elif teo:
@@ -459,50 +462,100 @@ def _header_es_del_mes(hn, year, month):
     return str(year) in hn or re.search(rf'\b{year % 100:02d}\b', hn) is not None
 
 
-def detectar_tramos_bolsa(lector, ws_f, year, month):
+def _dias_monto_bolsa(hn, year, month):
+    """Días del mes que lista un encabezado de precio por día, o [].
+
+    'b cemento ... monto 1/10/2026'          → [1]
+    'b cemento ... monto 6 y 9 oct 26'       → [6, 9]
+    'b cemento ... monto 7, 8, 13 y 14  oct' → [7, 8, 13, 14]  (sin año: vale)
+    """
+    m = re.search(r'\bmonto\b(.*)', hn)
+    if not m:
+        return []
+    resto = m.group(1)
+    fechas = re.findall(r'(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?', resto)
+    if fechas:
+        return [int(d) for d, mm, yy in fechas
+                if int(mm) == month and (not yy or int(yy) % 100 == year % 100)]
+    palabras = re.findall(r'[a-z]+', resto)
+    if not any(w.startswith(t) for w in palabras for t in _MES_TOKENS[month]):
+        return []
+    tok = re.search(r'\b(' + '|'.join(_MES_TOKENS[month]) + r')[a-z]*', resto)
+    antes, despues = resto[:tok.start()], resto[tok.end():]
+    anio = re.search(r'\b(\d{2}|\d{4})\b', despues)
+    if anio and int(anio.group(1)) % 100 != year % 100:
+        return []
+    return [int(d) for d in re.findall(r'\b(\d{1,2})\b', antes) if 1 <= int(d) <= 31]
+
+
+def detectar_tramos_bolsa(lector, ws_f, year, month, header_row=3):
     """Precios de la bolsa (25 kg) del mes según el día de pago.
 
-    Lee los encabezados de la fila 1 ('B CEMENTO LOMA NEGRA 25 K 1 AL 10 DE
-    SEPT 2026', '... 10 al 15 ...', '... desde el 16 ...') y el precio de la
-    fila 2. Ignora las columnas 'los q firmaron hasta agosto 2025' (son el
-    mismo precio ×2). Devuelve {'tramos': [(dia_hasta, precio)], 'desc': coef}
-    o None si el mes no tiene tramos cargados.
+    Dos formatos de encabezado, en cualquier fila arriba de los encabezados de
+    la tabla (precio en la fila de abajo):
+      * por tramo: 'B CEMENTO LOMA NEGRA 25 K 1 AL 10 DE SEPT 2026', '... 10 al
+        15 ...', '... desde el 16 ...' → 'tramos' [(dia_hasta, precio)].
+      * por día: 'B CEMENTO ... monto 6 y 9 oct 26', '... monto 1/10/2026'
+        → 'por_dia' {dia: precio}. Si un día figura en dos columnas, gana la
+        de más a la derecha (la más nueva).
+    Ignora las columnas 'los q firmaron hasta agosto 2025' (son el mismo
+    precio ×2). Devuelve {'tramos', 'por_dia', 'desc'} o None si el mes no
+    tiene precios cargados.
     """
-    tramos, desc = [], 1.0
-    for c in range(1, ws_f.max_column + 1):
-        h = ws_f.cell(1, c).value
-        if not isinstance(h, str):
-            continue
-        hn = _norm(h)
-        if not _header_es_del_mes(hn, year, month):
-            continue
-        if 'desc' in hn:
-            v = lector.valor(HOJA_BOLSA, 2, c)
-            if v and 0 < v < 1:
-                desc = v
-            continue
-        if 'firmaron' in hn:
-            continue
-        m = re.search(r'desde\s+el\s+(\d+)', hn)
-        if m:
-            hasta = 31
-        else:
-            m = re.search(r'(\d+)\s+al\s+(\d+)', hn)
-            if not m:
+    tramos, por_dia, desc = [], {}, 1.0
+    for r in range(1, max(header_row - 1, 2)):
+        for c in range(1, ws_f.max_column + 1):
+            h = ws_f.cell(r, c).value
+            if not isinstance(h, str):
                 continue
-            hasta = int(m.group(2))
-        precio = lector.valor(HOJA_BOLSA, 2, c)
-        if precio:
-            tramos.append((hasta, precio))
-    if not tramos:
+            hn = _norm(h)
+            if 'firmaron' in hn:
+                continue
+            es_tramo = re.search(r'desde\s+el\s+\d+|\d+\s+al\s+\d+', hn)
+            dias = [] if es_tramo else _dias_monto_bolsa(hn, year, month)
+            if dias:
+                precio = lector.valor(HOJA_BOLSA, r + 1, c)
+                if isinstance(precio, (int, float)) and precio > 0:
+                    for d in dias:
+                        por_dia[d] = precio
+                continue
+            if not _header_es_del_mes(hn, year, month):
+                continue
+            if 'desc' in hn:
+                v = lector.valor(HOJA_BOLSA, r + 1, c)
+                if v and 0 < v < 1:
+                    desc = v
+                continue
+            m = re.search(r'desde\s+el\s+(\d+)', hn)
+            if m:
+                hasta = 31
+            else:
+                m = re.search(r'(\d+)\s+al\s+(\d+)', hn)
+                if not m:
+                    continue
+                hasta = int(m.group(2))
+            precio = lector.valor(HOJA_BOLSA, r + 1, c)
+            if precio:
+                tramos.append((hasta, precio))
+    if not tramos and not por_dia:
         return None
-    return {'tramos': sorted(tramos), 'desc': desc}
+    return {'tramos': sorted(tramos), 'por_dia': por_dia, 'desc': desc}
 
 
 def precio_tramo(tramos_info, dia):
     """(precio 25 kg, texto del tramo) que corresponde al día de pago.
 
-    El primer tramo (precio congelado) se estira hasta DIA_TOPE_CONGELADO."""
+    Si el día tiene precio propio ('monto 6 y 9 oct') vale ese. Si no, los
+    tramos; el primero (precio congelado) se estira hasta DIA_TOPE_CONGELADO.
+    Sin tramos, un día sin precio propio toma el del último día cargado antes
+    (o el primero cargado, si es anterior a todos)."""
+    por_dia = tramos_info.get('por_dia') or {}
+    if dia in por_dia:
+        return por_dia[dia], f'precio del día {dia}'
+    if not tramos_info.get('tramos'):
+        previos = [d for d in por_dia if d < dia]
+        d = max(previos) if previos else min(por_dia)
+        return por_dia[d], f'precio del día {d}'
     primero_hasta, primero_precio = tramos_info['tramos'][0]
     if dia <= max(primero_hasta, DIA_TOPE_CONGELADO):
         return primero_precio, f'congelado (hasta el {primero_hasta})'
@@ -514,6 +567,25 @@ def precio_tramo(tramos_info, dia):
         desde = hasta + 1
     hasta, precio = tramos_info['tramos'][-1]
     return precio, f'desde el {desde}'
+
+
+def precio_dia_habil_anterior(tramos_info, dia):
+    """(precio, día) del último día con precio propio antes de `dia`, si entre
+    los dos hubo días sin precio (finde/feriado) y el precio cambió; si no, None.
+
+    Una transferencia hecha el sábado o el feriado aparece acreditada el día
+    hábil siguiente, pero se hizo con el precio que regía antes: si el cliente
+    pagó al menos ese precio, la cuota se toma como entera."""
+    por_dia = (tramos_info or {}).get('por_dia') or {}
+    if dia not in por_dia:
+        return None
+    previos = [d for d in por_dia if d < dia]
+    if not previos:
+        return None
+    d = max(previos)
+    if dia - d <= 1 or por_dia[d] == por_dia[dia]:
+        return None
+    return por_dia[d], d
 
 
 def _mismo_cliente(matches):
@@ -848,16 +920,19 @@ def procesar(
     if HOJA_BOLSA in sheets_cfg and tx_year:
         ws_bf = wb_deu_f[HOJA_BOLSA]
         hr_b = sheets_cfg[HOJA_BOLSA]['header_row']
-        tramos_bolsa = tramos_bolsa_override or detectar_tramos_bolsa(lector, ws_bf, tx_year, tx_month)
+        tramos_bolsa = tramos_bolsa_override or detectar_tramos_bolsa(lector, ws_bf, tx_year, tx_month, hr_b)
         bolsa_cols = {
             'bolsas_mes': _col_por_header(ws_bf, hr_b, ('bolsas por mes',)),
             'fecha_firma': _col_por_header(ws_bf, hr_b, ('fecha firma',)),
-            'firmaron': {c for c in range(1, ws_bf.max_column + 1)
-                         if isinstance(ws_bf.cell(1, c).value, str)
-                         and 'firmaron' in _norm(ws_bf.cell(1, c).value)},
+            # celdas de precio (col, fila) de las columnas 'los q firmaron...'
+            'firmaron': {(c, r + 1) for r in range(1, max(hr_b - 1, 2))
+                         for c in range(1, ws_bf.max_column + 1)
+                         if isinstance(ws_bf.cell(r, c).value, str)
+                         and 'firmaron' in _norm(ws_bf.cell(r, c).value)},
         }
         if tramos_bolsa:
-            txt = ', '.join(f'hasta el {h}: ${p:,.0f}' for h, p in tramos_bolsa['tramos'])
+            txt = ', '.join([f'hasta el {h}: ${p:,.0f}' for h, p in tramos_bolsa['tramos']]
+                            + [f'día {d}: ${p:,.0f}' for d, p in sorted((tramos_bolsa.get('por_dia') or {}).items())])
             log_fn(f'Bolsa cemento {MESES_ES[tx_month]}: {txt} (bolsa 25 kg; ×2 si firmó hasta ago-2025)')
         else:
             log_fn('Bolsa cemento: no se encontraron los precios por tramo del mes → se usa el teórico de la planilla')
@@ -870,17 +945,21 @@ def procesar(
         from openpyxl.utils import column_index_from_string
         f = lector.formula(HOJA_BOLSA, srow, teo_col)
         if isinstance(f, str) and f.startswith('='):
-            refs = {column_index_from_string(m.group(1))
-                    for m in _RE_REF_CELDA.finditer(f) if m.group(2) == '2'}
+            refs = {(column_index_from_string(m.group(1)), int(m.group(2)))
+                    for m in _RE_REF_CELDA.finditer(f) if int(m.group(2)) < hr_b}
             if refs:
                 return bool(refs & bolsa_cols['firmaron'])
         fc = bolsa_cols.get('fecha_firma')
         ff = parse_date(wb_deu_data[HOJA_BOLSA].cell(srow, fc).value) if fc else None
         return bool(ff and ff <= FIRMA_BOLSA_50K_HASTA)
 
-    def teo_de(sname, srow, teo_col, fecha):
+    def teo_de(sname, srow, teo_col, fecha, monto=None):
         """(teórico, info) de una fila. En BOLSA CEMENTO y el mes en curso se
-        calcula con el precio del tramo de `fecha`; si no, el de la planilla."""
+        calcula con el precio del tramo de `fecha`; si no, el de la planilla.
+
+        Con `monto`: si `fecha` viene después de un finde/feriado y el monto
+        cubre la cuota (o N cuotas) al precio del último día hábil, vale ese
+        precio (ver precio_dia_habil_anterior)."""
         if (sname == HOJA_BOLSA and tramos_bolsa and bolsa_cols.get('bolsas_mes')
                 and teo_col == sheets_cfg[HOJA_BOLSA]['teo_col']):
             bolsas = lector.valor(sname, srow, bolsa_cols['bolsas_mes'])
@@ -895,8 +974,16 @@ def procesar(
                 doble = bolsa_doble(srow, teo_col)
                 precio_bolsa = precio * (2 if doble else 1)
                 teo = round(bolsas * precio_bolsa * tramos_bolsa['desc'])
+                alt = precio_dia_habil_anterior(tramos_bolsa, dia)
+                if alt and monto:
+                    precio_alt = alt[0] * (2 if doble else 1)
+                    teo_alt = round(bolsas * precio_alt * tramos_bolsa['desc'])
+                    n = max(1, round(monto / teo_alt))
+                    if n * teo_alt - tolerance <= monto < n * teo:
+                        teo, precio_bolsa, tramo = teo_alt, precio_alt, f'precio del día {alt[1]}'
                 return teo, {'dia': dia, 'tramo': tramo,
-                             'congelado': precio == tramos_bolsa['tramos'][0][1], 'precio_bolsa': precio_bolsa,
+                             'congelado': bool(tramos_bolsa['tramos']) and tramo.startswith('congelado'),
+                             'por_dia': tramo.startswith('precio del'), 'precio_bolsa': precio_bolsa,
                              'kg': 50 if doble else 25, 'bolsas': bolsas}
         return lector.valor(sname, srow, teo_col), None
 
@@ -945,7 +1032,7 @@ def procesar(
                 n = max_cuota_celda(b['txt'])
                 if n is None or b['fecha'] is None:
                     continue
-            teo_p, info_p = teo_de(sname, srow, c - 2, b['fecha'])
+            teo_p, info_p = teo_de(sname, srow, c - 2, b['fecha'], pagado(sname, srow, c))
             if not teo_p:
                 continue
             saldo = cuotas_en_celda(b['txt']) * teo_p - pagado(sname, srow, c)
@@ -1240,7 +1327,7 @@ def procesar(
             for (sname, srow, snombre) in matches:
                 cfg = cols_de(sname, fecha_dt, sheets_cfg[sname])
                 ws_d = wb_deu_data[sname]
-                teo, _ = teo_de(sname, srow, cfg['teo_col'], fecha_dt)
+                teo, _ = teo_de(sname, srow, cfg['teo_col'], fecha_dt, monto_num)
                 real = wb_deu_f[sname].cell(srow, cfg['real_col']).value
                 # Un lote con "parte de cN" en el mes sigue disponible (en pesos)
                 if not es_usd and cuota_parcial_de_celda(ws_d.cell(srow, cfg['cuota_col']).value) is not None:
@@ -1303,7 +1390,7 @@ def procesar(
             sname, srow, snombre = matches[0]
             cfg = cols_de(sname, fecha_dt, sheets_cfg[sname])
             ws_d = wb_deu_data[sname]
-            teo, _ = teo_de(sname, srow, cfg['teo_col'], fecha_dt)
+            teo, _ = teo_de(sname, srow, cfg['teo_col'], fecha_dt, monto_num)
             real = wb_deu_f[sname].cell(srow, cfg['real_col']).value
             if not es_usd and cuota_parcial_de_celda(ws_d.cell(srow, cfg['cuota_col']).value) is not None:
                 real = None

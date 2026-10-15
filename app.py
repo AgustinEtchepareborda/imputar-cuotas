@@ -198,8 +198,9 @@ try:
     cuota_override = parse_cuota_override(override_text)
 
     with st.expander('Bolsa cemento: precios del mes (opcional)'):
-        st.caption('Por defecto se leen de la fila 1-2 de BOLSA CEMENTO (tramos "1 al 10", '
-                   '"10 al 15", "desde el 16"). Completá solo si hay que corregirlos: '
+        st.caption('Por defecto se leen de las filas de arriba de BOLSA CEMENTO (tramos "1 al 10", '
+                   '"10 al 15", "desde el 16", o precios por día "monto 6 y 9 oct"). '
+                   'Completá solo si hay que corregirlos: '
                    '`día hasta: precio bolsa 25 kg`, ej. `10: 8300, 15: 8390, 31: 8490`. '
                    'Los que firmaron hasta ago-2025 pagan el doble (bolsa de 50 kg).')
         tramos_text = st.text_input('Tramos', value='', label_visibility='collapsed')
