@@ -376,8 +376,14 @@ try:
                     'Fecha': r['fecha'].strftime('%d/%m/%Y') if r['fecha'] else '?',
                     'Hoja deudores': r['hoja'],
                     'Identificado por': r.get('via_comprobante', ''),
+                    'Saldo a favor usado': fmt_monto(r['saldo_favor'], es_usd_sim) if r.get('saldo_favor') else '',
                 })
             df_ok = pd.DataFrame(rows_ok)
+            if not df_ok['Saldo a favor usado'].any():
+                df_ok = df_ok.drop(columns='Saldo a favor usado')
+            else:
+                st.caption('💰 "Saldo a favor usado": pagó la cuota menos lo que le sobró el mes anterior '
+                           '(columna "sobrante"). Va como cuota entera y el sobrante de ese mes queda en 0.')
             if not df_ok['Identificado por'].any():
                 df_ok = df_ok.drop(columns='Identificado por')
             elif any(r.get('via_comprobante') for r in results):

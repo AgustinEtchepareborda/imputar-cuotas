@@ -229,30 +229,43 @@ def mapa_meses_columnas(ws, header_row):
     Permite imputar cada transferencia en la columna del mes de SU fecha
     (las hojas USD arrastran transferencias de varios meses en la misma hoja).
     """
+    return _mapa_headers_mes(ws, header_row, 'teorico')
+
+
+def mapa_sobrantes(ws, header_row):
+    """{(year, month): col} de las columnas 'sobrante OCT 2026' (saldo a favor
+    del mes, que la oficina carga como =real-teórico)."""
+    return _mapa_headers_mes(ws, header_row, 'sobrante')
+
+
+def _mes_de_header(hn):
+    """(year, month) de un header normalizado ('pago sept. 26 teorico'), o None."""
+    yr = re.search(r'\b(20\d{2}|\d{2})\b', hn)
+    if not yr:
+        return None
+    y = int(yr.group(1))
+    year = y if y > 99 else 2000 + y
+    # Matchear por PALABRA (prefijo), no substring: 'ago' no debe matchear
+    # dentro de 'pago', ni 'dic' dentro de otra palabra.
+    palabras = re.findall(r'[a-z]+', hn)
+    for num, toks in _MES_TOKENS.items():
+        if any(w.startswith(t) for w in palabras for t in toks):
+            return year, num
+    return None
+
+
+def _mapa_headers_mes(ws, header_row, clave):
     mapa = {}
     for c in range(1, ws.max_column + 1):
         h = ws.cell(header_row, c).value
         if not h:
             continue
         hn = _norm(str(h))
-        if 'teorico' not in hn:
+        if clave not in hn:
             continue
-        yr = re.search(r'\b(20\d{2}|\d{2})\b', hn)
-        if not yr:
-            continue
-        y = int(yr.group(1))
-        year = y if y > 99 else 2000 + y
-        # Matchear por PALABRA (prefijo), no substring: 'ago' no debe matchear
-        # dentro de 'pago', ni 'dic' dentro de otra palabra.
-        palabras = re.findall(r'[a-z]+', hn)
-        mes = None
-        for num, toks in _MES_TOKENS.items():
-            if any(w.startswith(t) for w in palabras for t in toks):
-                mes = num
-                break
-        if mes is None:
-            continue
-        mapa[(year, mes)] = c
+        ym = _mes_de_header(hn)
+        if ym is not None:
+            mapa[ym] = c
     return mapa
 
 
@@ -1100,7 +1113,7 @@ def procesar(
         if len(partes) == 1 and not isinstance(base, str):
             real_val = b['sumas'][0] if b['sumas'] else base
         else:
-            real_val = '=' + '+'.join(partes)
+            real_val = '=' + partes[0] + ''.join(p if p.startswith('-') else '+' + p for p in partes[1:])
         txt = b['txt']
         max_ent = None
         if isinstance(txt, str):
@@ -1197,6 +1210,40 @@ def procesar(
         if not isinstance(teo_sig, (int, float)) or teo_sig <= 0 or abs(monto - teo_sig) > tolerance:
             return None
         return cfg_sig, teo_sig
+
+    mapas_sobrante = {}
+
+    def saldo_a_favor(sname, srow, cuota_col_act):
+        """Saldo a favor que le quedó del último mes pagado (col 'sobrante <MES>'),
+        si todavía no se usó: {'saldo', 'col' (N° cuota de ese mes), 'mes'} o None.
+
+        Solo mira el último mes con pago antes del de la corrida: cuando se usa,
+        el pago real de ese mes queda '=...-saldo' y el sobrante pasa a 0. Se
+        descarta si la planilla no lo respalda (pagado − cuotas × teórico)."""
+        if sname not in mapas_mes:
+            mapas_mes[sname] = mapa_meses_columnas(wb_deu_data[sname], sheets_cfg[sname]['header_row'])
+        if sname not in mapas_sobrante:
+            mapas_sobrante[sname] = mapa_sobrantes(wb_deu_f[sname], sheets_cfg[sname]['header_row'])
+        if not mapas_sobrante[sname]:
+            return None
+        previos = sorted(((ym, t) for ym, t in mapas_mes[sname].items() if t + 2 < cuota_col_act), reverse=True)
+        for ym, teo_c in previos:
+            b = bloque(sname, srow, teo_c + 2)
+            if bloque_vacio(b):
+                continue
+            sob_c = mapas_sobrante[sname].get(ym)
+            if sob_c is None:
+                return None
+            saldo = lector.valor(sname, srow, sob_c)
+            if not isinstance(saldo, (int, float)):
+                return None
+            saldo += sum(x for x in b['sumas'] if x < 0)   # ya usado en esta corrida
+            teo_p = lector.valor(sname, srow, teo_c)
+            n = cuotas_en_celda(b['txt']) or 1
+            if not isinstance(teo_p, (int, float)) or saldo > pagado(sname, srow, teo_c + 2) - n * teo_p + tolerance:
+                return None
+            return {'saldo': round(saldo), 'col': teo_c + 2, 'mes': ym} if saldo > tolerance else None
+        return None
 
     # ── Comprobantes del bot: último recurso para saber quién es el cliente ──
     # (ver comprobantes_helper). El comprobante solo da el NOMBRE; la fila
@@ -1605,7 +1652,21 @@ def procesar(
             m = monto_num
             dif = m - teo_num
             n_mult = 1
-            if dif > tolerance:
+            # Saldo a favor del mes anterior: si el pago es la(s) cuota(s) menos
+            # ese saldo, es cuota entera (le avisamos que lo descontara).
+            favor = None
+            if bloque_vacio(b_act) and not ya_imputado and not al_mes_siguiente and dif < -tolerance:
+                favor = saldo_a_favor(sname, srow, cfg['cuota_col'])
+                if favor:
+                    n_f = max(1, round((m + favor['saldo']) / teo_num))
+                    if abs(m + favor['saldo'] - n_f * teo_num) <= tolerance:
+                        n_mult = n_f
+                        dif = m + favor['saldo'] - n_f * teo_num
+                    else:
+                        favor = None
+            if favor:
+                pass
+            elif dif > tolerance:
                 n = round(m / teo_num)
                 if n >= 2 and abs(m - n * teo_num) <= max(tolerance, teo_num * MULTI_TOL_RATIO):
                     n_mult = n
@@ -1649,7 +1710,7 @@ def procesar(
                 continue
 
             if (not (completar or acumular or parte_nueva is not None) and bloque_vacio(b_act)
-                    and not al_mes_siguiente):
+                    and not al_mes_siguiente and not favor):
                 # Cuota(s) entera(s) en un mes vacío: camino de siempre (el mes
                 # siguiente va por abajo: ese camino escribe en el mes de la corrida)
                 n_cuotas_partes = enteras
@@ -1677,12 +1738,19 @@ def procesar(
                         tocados.append(col)
                     return b
 
+                if favor:
+                    # sale del mes en que sobró ('=...-saldo', el sobrante queda en 0);
+                    # va primero: el último bloque escrito pisa MAYOR CUOTA
+                    _anotar(favor['col'], -favor['saldo'])
                 if enteras:
                     cuotas_ent = list(range(x_sig, x_sig + enteras))
                     b = _anotar(cfg['cuota_col'], m - sum(p['saldo'] for p in completar))
+                    if favor:
+                        b['sumas'].append(favor['saldo'])
                     for c_n in cuotas_ent:
                         b['txt'] = texto_agregar_cuota(b['txt'], c_n)
-                    piezas.append(f'c{_format_cuotas(cuotas_ent)}')
+                    piezas.append(f'c{_format_cuotas(cuotas_ent)}'
+                                  + (f' (usa saldo a favor {_pesos(favor["saldo"])})' if favor else ''))
                 for p in completar:
                     b = _anotar(p['col'], p['saldo'])
                     b['txt'] = texto_completar_cuota(b['txt'], p['n'])
@@ -1728,11 +1796,14 @@ def procesar(
                     'hoja_fila': srow,
                     'monto_real': m,
                     'monto_teo': round(teo_num),
-                    'diferencia': round(m - teo_num),
+                    'diferencia': round(m + (favor['saldo'] if favor else 0) - teo_num),
+                    'saldo_favor': favor['saldo'] if favor else None,
                     'cuota': ' y '.join(piezas),
                     'fecha': fecha_dt,
                     'etiqueta': piezas,
-                    'bloques': [snapshot(sname, srow, c) for c in tocados],
+                    # el mes del que sale el saldo a favor no toca MAYOR CUOTA
+                    'bloques': [dict(snapshot(sname, srow, c), **({'max_cuota': None} if favor and c == favor['col'] else {}))
+                                for c in tocados],
                 })
                 if reclamo and reclamo[1] > tolerance and sname == HOJA_BOLSA and reclamos_out is not None:
                     n_r, saldo_r, teo_r, info_r = reclamo
