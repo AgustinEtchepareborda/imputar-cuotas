@@ -29,17 +29,34 @@ Todo lo que se commitea queda visible en GitHub (y en el historial aunque despu�
 
 Para ejemplos usar datos inventados y obvios: CUIT `20-11111111-2`, teléfono `2990001111`, nombre `Apellido Nombre`. Antes de commitear, revisar el diff buscando datos copiados de las planillas. Si algo se filtró: sacarlo, reescribir el historial y hacer force push (ya pasó con teléfonos en un docstring, oct-2026).
 
-## Cache de comprobantes (Google Sheets)
+## Comprobantes del bot (Google Sheets)
 
-El sheet "Datos comprobantes" (su ID se configura en la variable de entorno `COMPROBANTES_SHEET_ID`) tiene los datos de clientes que mandaron comprobantes al bot. Se usa como fallback adicional cuando el CUIT no se encuentra en deudores ni en hojas anteriores de imputaciones.
+El sheet "Datos comprobantes" (lo llenan los bots de WhatsApp y mail de Leuche) es el **último recurso** para saber quién es el cliente de una transferencia: después de deudores y de las semanas anteriores. Solo da el **nombre**; la fila sale de buscarlo en deudores.
 
-**Antes de cada imputación semanal**, refrescar el cache:
+**Acceso**: la app lo lee directo con una cuenta de servicio de Google (proyecto Leuche, solo **Lector** de ese sheet). La clave va en `.streamlit/secrets.toml` (local, ignorado por git) y en los secrets de Streamlit Cloud:
 ```
-python exportar_comprobantes.py
+COMPROBANTES_SHEET_ID = "..."
+[gcp_service_account]
+type = "service_account"
+...  # el JSON de la clave, campo por campo
 ```
-Requiere `pip install gspread`. La primera vez abre el navegador para autorizar (OAuth). Después queda guardado.
+Se relee cada 10 min. Si no se puede leer, usa `datos/comprobantes_cache.json` (`python exportar_comprobantes.py` lo refresca). Arriba de los resultados la app muestra cuántos comprobantes cargó y de dónde.
 
-Si no se corre el exportar, igual funciona con el último cache guardado en `datos/comprobantes_cache.json`.
+**Cómo está cargado el sheet** (`comprobantes_helper.py`):
+- `nombre_apellido` es el **titular de la cuenta que pagó** (puede ser una empresa o un familiar). El cliente sale de `titular_declarado` → nombre del archivo (`Comprobante_[MAIL_]Nombre_Apellido_fecha.ext`) → `nombre_apellido`, en ese orden.
+- `monto` y `fecha` son texto libre del OCR en muchos formatos (`1.234.000,00`, `123.456`, `17/septiembre/2026 a las 9:17.`, `30062026`...). Si la fecha no se lee, se usa la de envío con más margen.
+- Duplicados (mismo comprobante por WhatsApp y mail) se descartan.
+
+**Cuándo se usa**:
+1. CUIT que no está en deudores ni en semanas anteriores → comprobantes de ese **CUIT de pagador**.
+2. Sin CUIT (`DNET CREDITO NE...` / `587 - DATANET`: transferencias desde home banking de empresa, el extracto no trae el CUIT; el número `NE…`/`CTE …` es de la operación y cambia cada vez) o CUIT sin comprobante → comprobante con **el mismo monto (±$1) y fecha** entre 4 días antes y 1 después de la acreditación.
+
+**Cómo elige al cliente** (solo imputa si queda **uno**; si no, a ambiguos con los candidatos):
+1. Alguna variante del nombre da un único cliente en deudores.
+2. Si no: otros comprobantes del **mismo pagador** (mismo mail, CUIT o titular) que ya quedaron imputados en semanas anteriores (por monto + fecha) → el nombre de col H. Así, imputado a mano el primero, los siguientes de esa cuenta salen solos.
+3. Si no: filas de deudores que comparten una palabra del nombre y cuyo teórico × N (N ≤ 6) es exactamente el monto. Si cierra con varios clientes, va a ambiguos con `Nombre (N × teórico)`.
+
+Lo identificado así aparece en la columna "Identificado por" para revisarlo.
 
 ## Cómo correr la imputación de una nueva semana (pesos)
 
@@ -95,7 +112,8 @@ Muchos clientes transfieren desde el número de cuenta (`402...`, `440...`), no 
 2. Del texto de col H se corta todo lo que va desde el primer marcador `cN`/`lN` en adelante (`"Fulano c8 en ambos lotes mismo monto"` → `"Fulano"`), porque las notas sueltas rompían la búsqueda
 3. Busca ese nombre en deudores por palabras clave (case-insensitive)
 4. Si hay 1 match → imputa; si hay **varios pero todos del mismo titular** → los trata como lotes del mismo cliente (sigue por la lógica de reparto); si hay 0 o varios con nombres distintos → reporta como ambiguo
-5. Dos transferencias de **cuentas distintas** que resuelven al mismo cliente por nombre se imputan como cuotas consecutivas en la misma fila (la identidad es el nombre, no el número de cuenta)
+5. Si tampoco hay antecedente, busca en los comprobantes del bot (ver "Comprobantes del bot"); también cuando la transferencia no trae CUIT (DATANET)
+6. Dos transferencias de **cuentas distintas** que resuelven al mismo cliente por nombre se imputan como cuotas consecutivas en la misma fila (la identidad es el nombre, no el número de cuenta)
 
 ## Cómo imputa múltiples lotes del mismo cliente
 

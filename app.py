@@ -9,13 +9,24 @@ import streamlit as st
 import pandas as pd
 
 from imputar_core import procesar, aplicar, ultima_fila_con_datos
-from comprobantes_helper import cargar_indice
+from comprobantes_helper import Comprobantes, cargar_filas
 from mep_helper import cargar_mep
 
 
 @st.cache_data(ttl=3600)
 def cargar_mep_cacheado():
     return cargar_mep()
+
+
+@st.cache_data(ttl=600, show_spinner='Leyendo comprobantes del bot...')
+def cargar_comprobantes_cacheado():
+    """Filas del sheet "Datos comprobantes" (cuenta de servicio en los
+    secrets) o, si no se puede, del cache local. Se relee cada 10 minutos."""
+    try:
+        secrets = {k: st.secrets[k] for k in ('gcp_service_account', 'COMPROBANTES_SHEET_ID') if k in st.secrets}
+    except Exception:  # sin secrets.toml
+        secrets = {}
+    return cargar_filas(secrets)
 
 st.set_page_config(page_title="Imputar Cuotas", page_icon="📊", layout="wide")
 
@@ -39,8 +50,6 @@ def nombre_con_fecha(nombre):
         nuevo = f"{base} {hoy:%d.%m.%y}"
     return nuevo + ext
 
-
-CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datos', 'comprobantes_cache.json')
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -222,7 +231,9 @@ try:
         # Procesar en el orden del archivo (cronológico), respetando la selección
         orden = [h for h in hojas_semana if h in seleccion]
 
-        comprobantes_cache = cargar_indice(CACHE_PATH) if os.path.exists(CACHE_PATH) else {}
+        filas_comp, origen_comp = cargar_comprobantes_cacheado()
+        comprobantes = (Comprobantes.desde_dict_legacy(filas_comp) if isinstance(filas_comp, dict)
+                        else Comprobantes.desde_filas(filas_comp))
         mep_rates, mep_origen = ({}, None)
         if any(es_hoja_pesos(h) for h in orden):
             mep_rates, mep_origen = cargar_mep_cacheado()
@@ -247,7 +258,7 @@ try:
                     tolerance=tol,
                     max_row=int(max_row),
                     cuota_override=cuota_override,
-                    comprobantes_cache=comprobantes_cache,
+                    comprobantes_cache=comprobantes,
                     mep_rates=mep_rates,
                     log_fn=logs.append,
                     reclamos_out=reclamos,
@@ -288,6 +299,7 @@ try:
         st.session_state['sim'] = {
             'passes': passes,
             'mep_origen': mep_origen,
+            'comp_info': f'{len(comprobantes)} comprobantes del bot ({origen_comp})',
             'imp_bytes': imp_bytes,
             'deu_bytes': deu_bytes,
             'imp_name': imp_file.name,
@@ -302,6 +314,8 @@ try:
         st.stop()
 
     passes = sim['passes']
+    if sim.get('comp_info'):
+        st.caption(f"🧾 {sim['comp_info']}")
 
     # Totales combinados
     tot_results = sum(len(p['results']) for p in passes)
@@ -361,8 +375,15 @@ try:
                     'Cuota': r['cuota'],
                     'Fecha': r['fecha'].strftime('%d/%m/%Y') if r['fecha'] else '?',
                     'Hoja deudores': r['hoja'],
+                    'Identificado por': r.get('via_comprobante', ''),
                 })
-            st.dataframe(pd.DataFrame(rows_ok), use_container_width=True, hide_index=True)
+            df_ok = pd.DataFrame(rows_ok)
+            if not df_ok['Identificado por'].any():
+                df_ok = df_ok.drop(columns='Identificado por')
+            elif any(r.get('via_comprobante') for r in results):
+                st.caption('🧾 Las filas con "Identificado por" salieron de un comprobante del bot '
+                           '(transferencia sin CUIT o CUIT desconocido): revisalas antes de imputar.')
+            st.dataframe(df_ok, use_container_width=True, hide_index=True)
 
         if usd_en_pesos:
             st.subheader(f'💵 Clientes USD fijo que pagaron en pesos ({len(usd_en_pesos)})')
@@ -461,13 +482,12 @@ try:
                 cliente = a.get('cliente', a.get('concepto', ''))
                 monto = a.get('monto', '')
                 monto_str = fmt_monto(monto, es_usd_sim) if isinstance(monto, (int, float)) else str(monto) if monto else ''
-                matches_str = str(a.get('matches', '')) if a.get('matches') else ''
                 rows_amb.append({
                     'Fila': a.get('row', '?'),
                     'Motivo': a.get('motivo', ''),
                     'Cliente / Concepto': str(cliente)[:60] if cliente else '',
                     'Monto': monto_str,
-                    'Candidatos': matches_str[:80] if matches_str else '',
+                    'Candidatos': ', '.join(str(m[0]) for m in a['matches']) if a.get('matches') else '',
                 })
             st.dataframe(pd.DataFrame(rows_amb), use_container_width=True, hide_index=True)
 

@@ -10,6 +10,8 @@ import openpyxl
 from openpyxl.styles import PatternFill
 
 from mep_helper import mep_para_fecha
+from comprobantes_helper import (Comprobantes, describir as describir_comprobante,
+                                 DIAS_ANTES as DIAS_ANTES_COMP, DIAS_DESPUES_ENVIO as DIAS_DESPUES_COMP)
 
 YELLOW_FILL = PatternFill(patternType='solid', fgColor='FFFF00')
 
@@ -591,6 +593,19 @@ def precio_dia_habil_anterior(tramos_info, dia):
     return por_dia[d], d
 
 
+# Palabras de nombres de archivo de comprobantes que no son del cliente
+# ('Comprobante_MAIL_empresa_recepcion_apellido') y no sirven para buscarlo.
+PALABRAS_GENERICAS_COMPROBANTE = {
+    'COMPROBANTE', 'MAIL', 'TRANSFERENCIA', 'RECEPCION', 'ADMINISTRACION', 'PAGO',
+    'CUOTA', 'CUOTAS', 'FIDEICOMISO', 'INMOBI', 'ARGENTINA', 'BANCO',
+}
+
+
+# Nombre parcial + monto: cuántas cuotas juntas se aceptan como explicación
+# del monto (8 × una cuota chica no es una explicación creíble).
+MAX_CUOTAS_COMPROBANTE = 6
+
+
 def _mismo_cliente(matches):
     """True si todas las filas candidatas son del mismo titular (varios lotes)."""
     return len({_norm(str(n)).strip() for _, _, n in matches}) == 1
@@ -770,7 +785,7 @@ HOJAS_PREVIAS_PESOS = 20
 HOJAS_PREVIAS_USD = 6
 
 
-def build_previo(wb_imp, imp_sheet, es_usd=False):
+def build_previo(wb_imp, imp_sheet, es_usd=False, montos_out=None):
     all_sheets = wb_imp.sheetnames
     try:
         idx_actual = all_sheets.index(imp_sheet)
@@ -784,6 +799,9 @@ def build_previo(wb_imp, imp_sheet, es_usd=False):
 
     cuit_to_nombre_previo = {}
     cuit_to_cuota_previo = {}
+    # montos_out: lista opcional donde se juntan (monto, fecha, nombre) de cada
+    # fila ya imputada, para reconocer al cliente por un comprobante viejo del
+    # mismo pagador (transferencias sin CUIT, ver resolver_por_comprobante).
 
     def _indexar(ws_prev, solo_amarillas=False):
         fin = ultima_fila_con_datos(ws_prev, (3, 8))  # C = concepto, H = nombre
@@ -799,6 +817,11 @@ def build_previo(wb_imp, imp_sheet, es_usd=False):
                 continue
             if solo_amarillas and not is_row_yellow(ws_prev, row[0].row):
                 continue
+            if montos_out is not None and isinstance(row[5].value, (int, float)):
+                f_prev = parse_date(row[0].value)
+                n_prev = limpiar_nombre_col_h(col_h_str)
+                if f_prev and n_prev:
+                    montos_out.append((row[5].value, f_prev.date(), n_prev, ws_prev.title))
             cuit = extract_cuit_from_concepto(concepto)
             if cuit and cuit not in cuit_to_nombre_previo:
                 cuota_prev = cuota_en_col_h(col_h_str)
@@ -833,7 +856,7 @@ def procesar(
     tolerance=None,
     max_row=500,
     cuota_override=None,
-    comprobantes_cache=None,
+    comprobantes_cache=None,  # Comprobantes (comprobantes_helper) o dict {cuit: nombre}
     mep_rates=None,
     log_fn=None,
     solo_mes=None,
@@ -881,8 +904,11 @@ def procesar(
         tolerance = 5 if es_usd else 3000
     if cuota_override is None:
         cuota_override = {}
-    if comprobantes_cache is None:
-        comprobantes_cache = {}
+    # comprobantes_cache: Comprobantes (sheet del bot) o el dict viejo {cuit: nombre}
+    if isinstance(comprobantes_cache, Comprobantes):
+        comprobantes = comprobantes_cache
+    else:
+        comprobantes = Comprobantes.desde_dict_legacy(comprobantes_cache)
     if log_fn is None:
         log_fn = lambda msg: None
 
@@ -1089,9 +1115,10 @@ def procesar(
     for s_n, s_cfg in sheets_cfg.items():
         col_tel[s_n] = _col_por_header(wb_deu_f[s_n], s_cfg['header_row'], ('telefono',))
 
-    cuit_to_nombre_previo, cuit_to_cuota_previo = build_previo(wb_imp, imp_sheet, es_usd)
+    montos_previos = []
+    cuit_to_nombre_previo, cuit_to_cuota_previo = build_previo(wb_imp, imp_sheet, es_usd, montos_previos)
     log_fn(f'{len(cuit_to_nombre_previo)} CUITs con nombre desde hojas anteriores')
-    log_fn(f'{len(comprobantes_cache)} CUITs en cache de comprobantes')
+    log_fn(f'{len(comprobantes)} comprobantes del bot ({comprobantes.n_cuits} CUITs)')
 
     def _buscar_nombre(nombre_str):
         return buscar_en_deudores_por_nombre(nombre_str, nombre_index)
@@ -1171,6 +1198,119 @@ def procesar(
             return None
         return cfg_sig, teo_sig
 
+    # ── Comprobantes del bot: último recurso para saber quién es el cliente ──
+    # (ver comprobantes_helper). El comprobante solo da el NOMBRE; la fila
+    # sale de buscarlo en deudores.
+    via_comprobante = {}  # fila de imputaciones → cómo se identificó
+
+    def _cliente_de_comprobante(reg):
+        """Filas de deudores del cliente de un comprobante: la primera variante
+        del nombre (declarado, archivo, pagador) que da un único cliente."""
+        for n in reg['nombres']:
+            m = _buscar_nombre(n)
+            if m and (len(m) == 1 or _mismo_cliente(m)):
+                return m, n
+        return None, None
+
+    def _palabra_y_monto(regs, monto, fecha_dt):
+        """Si ninguna variante del nombre alcanza (archivo 'empresa_recepcion_
+        apellido'), filas que comparten alguna palabra del nombre y cuyo
+        teórico (o hasta MAX_CUOTAS_COMPROBANTE teóricos) es exactamente el
+        monto. Devuelve [(hoja, fila, nombre, n_cuotas, teórico)]."""
+        filas = {}
+        for reg in regs:
+            for n in reg['nombres']:
+                for p in n.split():
+                    p = _norm(p).upper()
+                    if len(p) >= 4 and p not in PALABRAS_GENERICAS_COMPROBANTE:
+                        for s, r, nom in nombre_index.get(p, []):
+                            filas[(s, r)] = nom
+        ok = []
+        for (s, r), nom in filas.items():
+            cfg = cols_de(s, fecha_dt, sheets_cfg[s])
+            teo, _ = teo_de(s, r, cfg['teo_col'], fecha_dt, monto)
+            n = n_cuotas_enteras(monto, teo)
+            if 1 <= n <= MAX_CUOTAS_COMPROBANTE and abs(monto - n * teo) <= tolerance:
+                ok.append((s, r, nom, n, teo))
+        return ok
+
+    def _historial_pagador(regs):
+        """Filas de deudores del cliente al que se le imputaron, en semanas
+        anteriores, otros comprobantes del mismo pagador (mismo mail o mismo
+        titular). Así, una vez imputado a mano el primero, los siguientes de
+        esa cuenta salen solos."""
+        clientes = {}
+        for reg in regs:
+            for sib in comprobantes.del_mismo_pagador(reg):
+                for monto_p, fecha_p, nombre_p, hoja_p in montos_previos:
+                    if abs(monto_p - sib['monto']) > 1:
+                        continue
+                    if not -DIAS_DESPUES_COMP <= (fecha_p - sib['fecha']).days <= DIAS_ANTES_COMP:
+                        continue
+                    m = _buscar_nombre(nombre_p)
+                    if m and (len(m) == 1 or _mismo_cliente(m)):
+                        clientes.setdefault(frozenset((s, r) for s, r, _ in m), (m, sib, hoja_p))
+        return list(clientes.values())
+
+    def resolver_por_comprobante(row_num, cuit_raw, monto, fecha_dt, concepto, monto_val, fecha_val):
+        """(matches, ident) si un comprobante del bot identifica al cliente.
+        Si no, agrega el caso a ambiguos y devuelve None."""
+        moneda = 'USD' if es_usd else 'ARS'
+        regs = comprobantes.por_cuit_de(cuit_raw) if cuit_raw else []
+        via = f'CUIT {cuit_raw}'
+        if regs and len({frozenset(r['nombres']) for r in regs}) > 1 and monto:
+            # el mismo pagador mandó comprobantes de clientes distintos → por monto
+            regs = [r for r in regs if r in comprobantes.por_monto(monto, fecha_dt, moneda)] or regs
+        if not regs:
+            regs = comprobantes.por_monto(monto, fecha_dt, moneda)
+            via = 'monto y fecha'
+        base = {'row': row_num, 'concepto': str(concepto)[:60] if concepto else '', 'monto': monto_val, 'fecha': fecha_val}
+        sin_cuit = 'sin CUIT' if not cuit_raw else f'CUIT {cuit_raw} no encontrado en deudores ni semanas anteriores'
+        if not regs:
+            ambiguous.append({**base, 'motivo': f'{sin_cuit}; tampoco hay comprobante del bot con ese monto y fecha'})
+            return None
+
+        clientes = {}
+        for reg in regs:
+            m, n = _cliente_de_comprobante(reg)
+            if m:
+                clientes.setdefault(frozenset((s, r) for s, r, _ in m), (m, n, reg))
+        if len(clientes) > 1:
+            ambiguous.append({**base, 'motivo': f'{sin_cuit}; hay {len(clientes)} comprobantes del bot por {via} de clientes distintos',
+                              'matches': [(m[0][2], None) for m, _, _ in clientes.values()]})
+            return None
+        descs = '; '.join(describir_comprobante(r) for r in regs[:3])
+        if clientes:
+            m, n, reg = next(iter(clientes.values()))
+            desc = f'comprobante por {via}: {describir_comprobante(reg)}'
+        else:
+            hist = _historial_pagador(regs)
+            if len(hist) > 1:
+                ambiguous.append({**base, 'motivo': f'{sin_cuit}; comprobante del bot por {via} ({descs}); el mismo pagador ya pagó por {len(hist)} clientes distintos',
+                                  'matches': [(h[0][0][2], None) for h in hist]})
+                return None
+            if hist:
+                m, sib, hoja_p = hist[0]
+                desc = (f'comprobante por {via}: {describir_comprobante(regs[0])}; '
+                        f'ese pagador ya pagó antes por este cliente ({describir_comprobante(sib)}, {hoja_p})')
+            else:
+                cand = _palabra_y_monto(regs, monto, fecha_dt) if monto else []
+                if not cand or not _mismo_cliente([c[:3] for c in cand]):
+                    if cuit_raw and via.startswith('CUIT'):
+                        sin_fila.append({'imp_row': row_num, 'nombre': regs[0]['nombres'][0]})
+                    if cand:
+                        cand.sort(key=lambda c: c[3])
+                        ambiguous.append({**base, 'motivo': f'{sin_cuit}; comprobante del bot por {via} ({descs}); el nombre no está completo en deudores y el monto cierra con varios',
+                                          'matches': [(f'{nom} ({k} × {teo:,.0f})'.replace(',', '.'), None) for _, _, nom, k, teo in cand]})
+                    else:
+                        ambiguous.append({**base, 'motivo': f'{sin_cuit}; comprobante del bot por {via} ({descs}) pero el nombre no está en deudores'})
+                    return None
+                m = [(s, r, nom) for s, r, nom, _, _ in cand]
+                desc = f'comprobante por {via} (nombre parcial + monto = {cand[0][3]} × teórico): {describir_comprobante(regs[0])}'
+        via_comprobante[row_num] = desc
+        log_fn(f'Fila {row_num}: {desc} → {m[0][2]}' + (f' ({len(m)} lotes)' if len(m) > 1 else ''))
+        return m, _norm(str(m[0][2]))
+
     for row in ws_imp.iter_rows(min_row=4, max_row=max_row):
         fecha_val = row[0].value
         monto_val = row[5].value
@@ -1198,10 +1338,15 @@ def procesar(
 
         cuit_raw = extract_cuit_from_concepto(concepto)
         if not cuit_raw:
-            ambiguous.append({'row': row_num, 'motivo': 'Sin CUIT extraíble', 'concepto': str(concepto)[:60] if concepto else '', 'monto': monto_val, 'fecha': fecha_val})
-            continue
-
-        matches = cuit_index.get(cuit_raw, [])
+            # DATANET / Interbanking: el extracto no trae el CUIT de quien paga
+            # → solo queda buscar el comprobante por monto y fecha.
+            res = resolver_por_comprobante(row_num, None, monto_val if isinstance(monto_val, (int, float)) else 0,
+                                           fecha_dt, concepto, monto_val, fecha_val)
+            if not res:
+                continue
+            matches, ident = res
+        else:
+            matches = cuit_index.get(cuit_raw, [])
 
         # Cliente de USD fijo pagando en pesos: el CUIT no está en las hojas de
         # pesos pero sí en la hoja USD. Convertir por MEP y reportar aparte.
@@ -1274,7 +1419,8 @@ def procesar(
         # en la misma fila de deudores. Es el CUIT cuando el match vino del
         # índice; si vino por nombre, es el nombre (un mismo cliente puede
         # transferir desde varias cuentas distintas y ninguna ser su CUIT).
-        ident = cuit_raw
+        if cuit_raw:
+            ident = cuit_raw
 
         if not matches:
             nombre_previo = cuit_to_nombre_previo.get(cuit_raw)
@@ -1298,27 +1444,11 @@ def procesar(
                     ambiguous.append({'row': row_num, 'motivo': f'CUIT {cuit_raw} no en deudores; "{nombre_previo}" no encontrado en deudores', 'concepto': str(concepto)[:60], 'monto': monto_val, 'fecha': fecha_val})
                     continue
             else:
-                nombre_comp = comprobantes_cache.get(cuit_raw)
-                if nombre_comp:
-                    m2 = _buscar_nombre(nombre_comp)
-                    if len(m2) == 1:
-                        matches = m2
-                        ident = _norm(nombre_comp)
-                        log_fn(f'Fila {row_num}: fallback comprobantes "{nombre_comp}" → {m2[0][2]}')
-                    elif len(m2) > 1 and _mismo_cliente(m2):
-                        matches = m2
-                        ident = _norm(nombre_comp)
-                        log_fn(f'Fila {row_num}: fallback comprobantes "{nombre_comp}" → {m2[0][2]} ({len(m2)} lotes)')
-                    elif len(m2) > 1:
-                        ambiguous.append({'row': row_num, 'motivo': f'CUIT {cuit_raw} en comprobantes como "{nombre_comp}"; da {len(m2)} candidatos', 'concepto': str(concepto)[:60], 'monto': monto_val, 'fecha': fecha_val, 'matches': [(n, None) for _, _, n in m2]})
-                        continue
-                    else:
-                        sin_fila.append({'imp_row': row_num, 'nombre': nombre_comp})
-                        ambiguous.append({'row': row_num, 'motivo': f'CUIT {cuit_raw} en comprobantes como "{nombre_comp}"; no encontrado en deudores', 'concepto': str(concepto)[:60], 'monto': monto_val, 'fecha': fecha_val})
-                        continue
-                else:
-                    ambiguous.append({'row': row_num, 'motivo': f'CUIT {cuit_raw} no encontrado en deudores, semanas anteriores ni comprobantes', 'concepto': str(concepto)[:60], 'monto': monto_val, 'fecha': fecha_val})
+                res = resolver_por_comprobante(row_num, cuit_raw, monto_val if isinstance(monto_val, (int, float)) else 0,
+                                               fecha_dt, concepto, monto_val, fecha_val)
+                if not res:
                     continue
+                matches, ident = res
 
         # monto numérico para todas las decisiones de abajo
         monto_num = monto_val if isinstance(monto_val, (int, float)) else 0
@@ -1760,6 +1890,11 @@ def procesar(
     sheets_cfg_out = dict(sheets_cfg)
     sheets_cfg_out.update(usd_cfgs)
 
+    # marcar lo que se identificó por un comprobante del bot (para revisarlo)
+    for lista, clave in ((results, 'imp_row'), (pago_menos, 'row'), (pago_mas, 'row'), (ambiguous, 'row')):
+        for e in lista:
+            if e.get(clave) in via_comprobante:
+                e['via_comprobante'] = via_comprobante[e[clave]]
     return results, pago_menos, pago_mas, ambiguous, sin_fila, usd_en_pesos, mes_info, sheets_cfg_out
 
 
