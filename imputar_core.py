@@ -1100,6 +1100,25 @@ def procesar(
                 mx = n
         return mx
 
+    def max_entera_fila(sname, srow):
+        """Mayor cuota ENTERA de la fila (sin las 'parte de cN'), mirando todos
+        los meses: es lo que va en MAYOR CUOTA."""
+        mx = None
+        for hc in cuota_history_cols.get(sname, []):
+            k = (sname, srow, hc)
+            val = estado_bloques[k]['txt'] if k in estado_bloques else wb_deu_data[sname].cell(srow, hc).value
+            if isinstance(val, (int, float)):
+                nums = [int(val)]
+            elif isinstance(val, str):
+                n_parc = cuota_parcial_de_celda(val)
+                nums = [int(x) for x in re.findall(r'\d+', _sin_notas(val)) if int(x) != n_parc]
+            else:
+                continue
+            for n in nums:
+                if 0 < n <= 200 and (mx is None or n > mx):
+                    mx = n
+        return mx
+
     def snapshot(sname, srow, cuota_col):
         """Valores finales a escribir en un bloque tocado."""
         b = estado_bloques[(sname, srow, cuota_col)]
@@ -1115,11 +1134,10 @@ def procesar(
         else:
             real_val = '=' + partes[0] + ''.join(p if p.startswith('-') else '+' + p for p in partes[1:])
         txt = b['txt']
-        max_ent = None
-        if isinstance(txt, str):
-            n_parc = cuota_parcial_de_celda(txt)
-            enteras = [int(x) for x in re.findall(r'\d+', _sin_notas(txt)) if int(x) != n_parc]
-            max_ent = max(enteras) if enteras else None
+        # La fórmula de MAYOR CUOTA no lee textos ("6 y 7", "parte de c8") →
+        # se escribe la mayor cuota entera de toda la fila (no la de este
+        # bloque: completar una parte vieja no puede bajarla).
+        max_ent = max_entera_fila(sname, srow) if isinstance(txt, str) else None
         return {'hoja': sname, 'fila': srow, 'real_col': cuota_col - 1, 'cuota_col': cuota_col,
                 'fecha_col': cuota_col + 1, 'real': real_val, 'cuota': txt,
                 'fecha': b['fecha_nueva'], 'max_cuota': max_ent}
