@@ -88,7 +88,7 @@ En cambio, el script:
    - Si dice `"parte de cX"` → la próxima cuota entera es `X+1` (en pesos, un pago chico puede ir a completar X: ver "Partes de cuota")
    - Si es un número normal → ya está imputado este mes, no volver a imputar
 2. Si está vacía, escanea **todas las columnas históricas** "NUMERO DE CUOTA" (meses anteriores) en la misma fila y toma el máximo + 1
-3. Si no hay historial en deudores, busca en las últimas hojas de imputaciones (semanas previas) la cuota imputada para ese CUIT
+3. Si no hay historial en deudores, busca en las últimas hojas de imputaciones (semanas previas) la cuota imputada para ese CUIT. **Excepción**: si el cliente tiene otro lote con historial, la fila sin historial es un lote nuevo → `c1` (la cuota de las semanas previas es del otro lote)
 4. Si aún no hay dato, usa `CUOTA_OVERRIDE` (dict manual en el CONFIG del script)
 
 ## Cómo resuelve el script clientes no encontrados por CUIT

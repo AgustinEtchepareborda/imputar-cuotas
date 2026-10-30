@@ -1100,6 +1100,16 @@ def procesar(
                 mx = n
         return mx
 
+    def cuota_previa_sin_historial(sname, srow, cuit, lotes):
+        """Última cuota para una fila SIN historial en deudores. Las semanas
+        anteriores dan la última cuota del CUIT, pero no de qué lote: si el
+        cliente tiene otro lote con historial, esta fila es un lote nuevo y
+        arranca en c1 (devuelve 0), no sigue la numeración del otro lote."""
+        otros = [(s, r) for s, r, _ in lotes if (s, r) != (sname, srow)]
+        if any(max_cuota_fila(s, r) is not None for s, r in otros):
+            return 0
+        return cuit_to_cuota_previo.get(cuit)
+
     def max_entera_fila(sname, srow):
         """Mayor cuota ENTERA de la fila (sin las 'parte de cN'), mirando todos
         los meses: es lo que va en MAYOR CUOTA."""
@@ -1735,7 +1745,7 @@ def procesar(
             else:
                 x_max = max_cuota_fila(sname, srow)
                 if x_max is None:
-                    x_max = cuit_to_cuota_previo.get(cuit_raw)
+                    x_max = cuota_previa_sin_historial(sname, srow, cuit_raw, matches)
                 if x_max is None and cuit_raw in cuota_override:
                     x_max = cuota_override[cuit_raw] - 1
                 if x_max is None and (enteras or parte_nueva is not None):
@@ -1899,11 +1909,13 @@ def procesar(
                     if n_celda is not None and (max_hist is None or n_celda > max_hist):
                         max_hist = n_celda
 
+                previa = None if max_hist is not None else cuota_previa_sin_historial(p_sname, p_srow, cuit_raw, matches)
                 if max_hist is not None:
                     next_cuota = max_hist + 1
-                elif cuit_raw in cuit_to_cuota_previo:
-                    next_cuota = cuit_to_cuota_previo[cuit_raw] + 1
-                    log_fn(f'Fila {row_num}: cuota previa {cuit_to_cuota_previo[cuit_raw]}+1={next_cuota}')
+                elif previa is not None:
+                    next_cuota = previa + 1
+                    log_fn(f'Fila {row_num}: cuota previa {previa}+1={next_cuota}'
+                           + (' (lote nuevo)' if previa == 0 else ''))
                 elif cuit_raw in cuota_override:
                     next_cuota = cuota_override[cuit_raw]
                     log_fn(f'Fila {row_num}: cuota override {next_cuota} para {p_snombre}')
