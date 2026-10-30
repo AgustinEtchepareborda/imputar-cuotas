@@ -13,8 +13,9 @@ datos/
   imputaciones.xlsx            ← archivo de transferencias bancarias
   deudores.xlsx                ← planilla de deudores/cuotas
   comprobantes_cache.json      ← cache local del Google Sheet "Datos comprobantes"
-imputar_s120.py                ← script pesos (listo para S 121, DRY_RUN=True)
-imputar_usd5.py                ← script USD (listo para USD 5, DRY_RUN=True)
+app.py                         ← interfaz web (Streamlit), lo que usa el usuario
+imputar_core.py                ← lógica de imputación (pesos y USD)
+mep_helper.py                  ← cotización MEP (USD pagados en pesos)
 comprobantes_helper.py         ← módulo de acceso al cache de comprobantes
 exportar_comprobantes.py       ← refresca el cache desde Google Sheets
 ```
@@ -58,24 +59,9 @@ Se relee cada 10 min. Si no se puede leer, usa `datos/comprobantes_cache.json` (
 
 Lo identificado así aparece en la columna "Identificado por" para revisarlo.
 
-## Cómo correr la imputación de una nueva semana (pesos)
+## Cómo correr la imputación de una semana
 
-El script **auto-detecta** la hoja (última "S NNN" del archivo) y las columnas del mes (busca "MES AÑO teorico" en los headers de deudores). No hace falta tocar nada al cambiar de semana o de mes.
-
-1. **Solo revisar `DRY_RUN = True`** en `imputar_s120.py` (ya está así por defecto)
-2. **Correr dry-run**: `python imputar_s120.py`
-3. **Revisar el reporte**, especialmente los casos ambiguos
-4. **Cambiar `DRY_RUN = False`** y volver a correr para escribir
-
-Si necesitás procesar una hoja específica (no la última), setear `IMP_SHEET = 'S 123'` manualmente.
-
-## Cómo correr la imputación USD
-
-Igual que pesos — auto-detecta la última hoja "USD N" y el mes:
-
-1. `DRY_RUN = True` en `imputar_usd5.py`
-2. `python imputar_usd5.py`
-3. Revisar → `DRY_RUN = False` → volver a correr
+Desde la app (`streamlit run app.py` o `arrancar.bat`; en producción, la de Streamlit Cloud): se suben imputaciones y deudores, se revisa el reporte (especialmente los ambiguos) y se confirma la escritura. `imputar_core.procesar` **auto-detecta** la hoja (última "S NNN" o "USD N") y las columnas del mes (busca "MES AÑO teorico" en los headers de deudores). No hace falta tocar nada al cambiar de semana o de mes.
 
 ## Estructura de deudores.xlsx
 

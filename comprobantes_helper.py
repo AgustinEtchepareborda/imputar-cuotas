@@ -325,7 +325,7 @@ def cargar_comprobantes(secrets=None, cache_path=DEFAULT_CACHE):
 
 
 def cargar_indice(cache_path=DEFAULT_CACHE):
-    """Compatibilidad con imputar_s120.py / imputar_usd5.py: {cuit: nombre}."""
+    """Índice simple {cuit: nombre} (lo usan los drivers locales)."""
     comp, _ = cargar_comprobantes(cache_path=cache_path)
     return {c: comp.por_cuit_de(c)[0]['nombres'][0] for c in comp.por_cuit}
 

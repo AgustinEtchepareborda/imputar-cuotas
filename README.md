@@ -2,7 +2,7 @@
 
 Herramienta interna para **automatizar la imputación de cuotas** a partir de las transferencias bancarias semanales. Toma el archivo de imputaciones (transferencias del banco) y registra en la planilla de deudores el monto real, el número de cuota y la fecha de cada pago, identificando al cliente por su CUIT.
 
-Cuenta con una interfaz web ([Streamlit](https://streamlit.io/)) para operar sin tocar código, y scripts de línea de comandos para uso avanzado.
+Cuenta con una interfaz web ([Streamlit](https://streamlit.io/)) para operar sin tocar código, que se despliega en Streamlit Cloud.
 
 > ⚠️ **Repositorio privado.** Procesa datos personales de clientes (CUITs, nombres, montos). No debe hacerse público.
 
@@ -34,8 +34,6 @@ Cuenta con una interfaz web ([Streamlit](https://streamlit.io/)) para operar sin
 ```
 ├── app.py                    # Interfaz web (Streamlit)
 ├── imputar_core.py           # Lógica central de imputación
-├── imputar_s120.py           # Script CLI — imputación en pesos
-├── imputar_usd5.py           # Script CLI — imputación en dólares
 ├── comprobantes_helper.py    # Acceso al cache de comprobantes (Google Sheets)
 ├── exportar_comprobantes.py  # Refresca el cache desde Google Sheets
 ├── mep_helper.py             # Cotización del dólar MEP
@@ -64,7 +62,7 @@ pip install -r requirements.txt
 
 ## ▶️ Uso
 
-### Interfaz web (recomendado)
+### Interfaz web
 
 ```bash
 streamlit run app.py
@@ -73,20 +71,6 @@ streamlit run app.py
 En Windows también podés hacer doble clic en **`arrancar.bat`**.
 
 Desde la web: se suben los archivos de imputaciones y de deudores, se revisa el reporte y se confirma la escritura.
-
-### Línea de comandos
-
-Los scripts corren por defecto en modo `DRY_RUN = True` (solo reportan, no escriben):
-
-```bash
-python imputar_s120.py      # pesos
-python imputar_usd5.py      # dólares
-```
-
-Flujo recomendado:
-
-1. Correr con `DRY_RUN = True` y revisar el reporte (especialmente los casos ambiguos).
-2. Cambiar a `DRY_RUN = False` y volver a correr para escribir en la planilla.
 
 ---
 
