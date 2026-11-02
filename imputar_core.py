@@ -1577,13 +1577,19 @@ def procesar(
                                              x_cfg['cuota_col'])
 
                 orden = sorted(disponibles, key=lambda x: (-_recencia(x), x[0], x[1]))
-                subset = None
-                for n in range(len(orden), 1, -1):
-                    cand = orden[:n]
-                    suma_teo = sum((t or 0) for _, _, _, t, _ in cand)
-                    multi_tol = max(tolerance, suma_teo * MULTI_TOL_RATIO)
-                    if suma_teo > 0 and abs(monto_num - suma_teo) <= multi_tol:
-                        subset = cand
+                # k cuotas en cada lote (k > 1: se pone al día con varias cuotas
+                # en todos los lotes de una sola transferencia). Antes solo se
+                # probaba k = 1 y las k × N cuotas terminaban apiladas en un lote.
+                subset, k_lote = None, 1
+                for k in range(1, 7):
+                    for n in range(len(orden), 1, -1):
+                        cand = orden[:n]
+                        suma_teo = k * sum((t or 0) for _, _, _, t, _ in cand)
+                        multi_tol = max(tolerance, suma_teo * MULTI_TOL_RATIO)
+                        if suma_teo > 0 and abs(monto_num - suma_teo) <= multi_tol:
+                            subset, k_lote = cand, k
+                            break
+                    if subset:
                         break
                 if subset:
                     targets = sorted(subset, key=lambda x: (x[0], x[1]))
@@ -1851,9 +1857,9 @@ def procesar(
                 continue
 
         if reparto_lotes:
-            # Una cuota a cada lote; cada lote lleva su propio teórico como pago real.
+            # k cuotas a cada lote; cada cuota lleva el teórico de su lote como pago real.
             usar = targets
-            counts = [1] * len(usar)
+            counts = [k_lote] * len(usar)
             montos_por_lote = [t if isinstance(t, (int, float)) else 0
                                for _, _, _, t, _ in usar]
         else:
