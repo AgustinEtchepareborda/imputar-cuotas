@@ -130,7 +130,7 @@ Cada hoja semanal ("S 121", "USD 5", etc.) tiene:
 - Si pagó menos pero diferencia ≤ tolerancia → imputar normalmente (cuota entera)
 - Si pagó más → imputar normalmente
 - Si ya fue imputado este mes (pesos, un lote): si el monto es el teórico del **mes siguiente** y esa columna está vacía → va al mes siguiente (cuota X+1; típico: paga a fin de mes la cuota que viene). Si no, y es la cuota del mes (o múltiplo) → se suma al mes actual (`=365200+373560`, `21 y 22`). Si no coincide con ninguno → ambiguo. Nunca si la fila ya tiene col H o si el pago del mes en deudores es esta misma transferencia (misma fecha y monto: la oficina la cargó sin pintar la fila)
-- Al imputar: escribir en col H `{nombre} [l{lote}] c{cuota}`, en col I `x`, pintar fila amarilla
+- Al imputar: escribir en col H `{nombre} [l{lote}] c{cuota}` con el **nombre entero** (nunca cortado; solo se limpian saltos de línea y espacios de más), pintar fila amarilla
 
 ## BOLSA CEMENTO: teórico por tramo de fecha
 
@@ -147,7 +147,7 @@ El precio de la bolsa se congela del 1 al 10 de cada mes; después sube (sept-26
 
 ## Partes de cuota (solo pesos)
 
-Formato igual al que usa la oficina a mano. Col H: `Nombre parte de c33`, `Nombre completa c32`, `Nombre completa c5 y c6`, `Nombre c14 y completa c13`. Deudores: el "pago real" se va sumando como fórmula (`=330000+9600`), N° cuota `parte de c33` → al completarse `33` (o `32 y parte de c33`), la fecha queda la del **primer** pago (sirve para calcular el saldo al precio de ese día).
+Formato igual al que usa la oficina a mano. Col H: `Nombre parte de c33`, `Nombre completa c32`, `Nombre completa c5 y c6`, `Nombre c14 y completa c13`. Deudores: el "pago real" se va sumando como fórmula (`=330000+9600`); si una transferencia completa una cuota de otro mes, en la cuota del mes queda lo transferido menos eso (`c14 y completa c13` → mes de c14 `=400000-10000`, mes de c13 `=390000+10000`), N° cuota `parte de c33` → al completarse `33` (o `32 y parte de c33`), la fecha queda la del **primer** pago (sirve para calcular el saldo al precio de ese día).
 
 Una parte pendiente = celda "N° cuota" con `parte de cN` en los últimos 3 meses (`MESES_PARTE`) con saldo > tolerancia. También cuenta una cuota anotada **entera** (`16`) pero pagada de menos (típico: pagó el precio congelado después del 10 y la oficina la imputó entera), cuando la transferencia es justo lo que le falta (±$500, `SALDO_EXACTO_TOL`) o es un pago chico (< 90% del teórico del mes) y a esa cuota le falta poco (más que la tolerancia y hasta el 10% de su teórico; diferencias mayores se asumen aceptadas por la oficina). Si la completa → `completa c16`; si no alcanza, la celda pasa a `parte de c16` y sale el reclamo por el resto. Saldo = (cuotas que menciona la celda × teórico de ese mes) − pagado. Si se completa en un mes posterior, se suma en la columna del mes **de la parte**.
 
@@ -160,7 +160,7 @@ Qué hace con cada transferencia (un lote destino):
    - si no → completa partes pendientes (la más vieja primero); si no alcanza, acumula en esa parte; lo que sobra queda `parte de cX+1`.
 3. **Paga de más**: si el sobrante alcanza para completar partes pendientes → `cX+1 y completa cN`; si no, como siempre (normal si ≤ $50.000, si no "PAGO MAS").
 
-**Saldo a favor** (pesos, un lote): la oficina carga lo que sobró en una columna `sobrante <MES> <AÑO>` (`=EX-EW`, o `=EX-2*EW` si fueron 2 cuotas) y al cliente se le avisa que lo descuente. En el primer pago del mes, si el pago + el sobrante del **último mes con pago** ≈ N cuotas (±tolerancia), va como cuota(s) entera(s): col H `Nombre c14 (usa saldo a favor $10.000)`, pago real del mes `=pago+saldo` y el del mes del sobrante `=...-saldo` (el sobrante queda en 0, no se vuelve a usar). Se ignora si la planilla no lo respalda (pagado − cuotas × teórico de ese mes < sobrante). Si paga entero sin descontar, el saldo no se arrastra: queda en la columna del mes viejo.
+**Saldo a favor** (pesos, un lote): la oficina carga lo que sobró en una columna `sobrante <MES> <AÑO>` (`=EX-EW`, o `=EX-2*EW` si fueron 2 cuotas) y al cliente se le avisa que lo descuente. En el primer pago del mes, si el pago + el sobrante del **último mes con pago** ≈ N cuotas (±tolerancia), va como cuota(s) entera(s): col H `Nombre c14 (usa saldo a favor $10.000)`, pago real del mes `=pago+saldo` y el del mes del sobrante `=...-saldo` (el sobrante queda en 0, no se vuelve a usar). Si con el saldo del lote no cierra, prueba con la **suma de los sobrantes de todos los lotes del mismo titular** (se le avisa el total y lo descuenta de una sola cuota): col H `Nombre l2 c11 (usa saldo a favor $20.000 de l1 y l2)` y cada lote queda `=...-su saldo`. Se ignora si la planilla no lo respalda (pagado − cuotas × teórico de ese mes < sobrante). Si paga entero sin descontar, el saldo no se arrastra: queda en la columna del mes viejo.
 
 **Reclamo por WhatsApp** (solo BOLSA CEMENTO): cada cuota que queda incompleta **al final de la corrida** genera un mensaje (si en la misma semana mandó la diferencia, no hay reclamo; si hubo varios pagos parciales, vale el último) con el saldo (y las otras partes abiertas) y un link `wa.me` al teléfono de la col TELEFONO (normalizado a `549…`; `telefonos_extra` permite pasarle teléfonos de otra fuente, p. ej. Supabase).
 

@@ -1688,16 +1688,33 @@ def procesar(
             n_mult = 1
             # Saldo a favor del mes anterior: si el pago es la(s) cuota(s) menos
             # ese saldo, es cuota entera (le avisamos que lo descontara).
+            # Si con el de este lote no cierra, prueba con el de todos los lotes
+            # del mismo titular (se le avisa el saldo total y lo descuenta de
+            # una sola cuota). favor = {'saldo': total, 'partes': [por lote]}.
             favor = None
             if bloque_vacio(b_act) and not ya_imputado and not al_mes_siguiente and dif < -tolerance:
-                favor = saldo_a_favor(sname, srow, cfg['cuota_col'])
-                if favor:
-                    n_f = max(1, round((m + favor['saldo']) / teo_num))
-                    if abs(m + favor['saldo'] - n_f * teo_num) <= tolerance:
+                def _cierra(total):
+                    n_f = max(1, round((m + total) / teo_num))
+                    return n_f if abs(m + total - n_f * teo_num) <= tolerance else None
+
+                propio = saldo_a_favor(sname, srow, cfg['cuota_col'])
+                propio = [dict(propio, hoja=sname, fila=srow)] if propio else []
+                otros_lotes = []
+                for s_o, r_o, n_o in matches:
+                    if (s_o, r_o) == (sname, srow) or _norm(str(n_o or '')).strip() != _norm(str(snombre or '')).strip():
+                        continue
+                    f_o = saldo_a_favor(s_o, r_o, cols_de(s_o, fecha_dt, sheets_cfg[s_o])['cuota_col'])
+                    if f_o:
+                        otros_lotes.append(dict(f_o, hoja=s_o, fila=r_o))
+                candidatos = [c for c in (propio, propio + otros_lotes if otros_lotes else []) if c]
+                for partes_f in candidatos:
+                    total_f = sum(p['saldo'] for p in partes_f)
+                    n_f = _cierra(total_f)
+                    if n_f:
+                        favor = {'saldo': total_f, 'partes': partes_f}
                         n_mult = n_f
-                        dif = m + favor['saldo'] - n_f * teo_num
-                    else:
-                        favor = None
+                        dif = m + total_f - n_f * teo_num
+                        break
             if favor:
                 pass
             elif dif > tolerance:
@@ -1772,19 +1789,40 @@ def procesar(
                         tocados.append(col)
                     return b
 
+                def _anotar_neto(col, bruto):
+                    # Lo que va a completar cuotas de otros meses se resta en la
+                    # fórmula ('=398320-11560'), así se ve qué parte es de cada una.
+                    # (las que se completan en este mismo bloque se suman aparte)
+                    a_otras = [p['saldo'] for p in completar if p['col'] != col]
+                    b = _anotar(col, bruto - sum(p['saldo'] for p in completar if p['col'] == col))
+                    b['sumas'].extend(-x for x in a_otras)
+                    return b
+
+                favor_otros = []   # bloques de OTROS lotes de los que sale saldo a favor
+                favor_txt = ''
                 if favor:
                     # sale del mes en que sobró ('=...-saldo', el sobrante queda en 0);
                     # va primero: el último bloque escrito pisa MAYOR CUOTA
-                    _anotar(favor['col'], -favor['saldo'])
+                    for pf in favor['partes']:
+                        if (pf['hoja'], pf['fila']) == (sname, srow):
+                            _anotar(pf['col'], -pf['saldo'])
+                        else:
+                            bloque(pf['hoja'], pf['fila'], pf['col'])['sumas'].append(-pf['saldo'])
+                            favor_otros.append((pf['hoja'], pf['fila'], pf['col']))
+                    favor_txt = f' (usa saldo a favor {_pesos(favor["saldo"])}'
+                    if favor_otros:
+                        lotes_f = sorted((wb_deu_data[pf['hoja']].cell(pf['fila'], sheets_cfg[pf['hoja']]['lote_col']).value
+                                          for pf in favor['partes']), key=lambda x: (str(type(x)), x))
+                        favor_txt += ' de ' + _format_cuotas([f'l{x}' for x in lotes_f])
+                    favor_txt += ')'
                 if enteras:
                     cuotas_ent = list(range(x_sig, x_sig + enteras))
-                    b = _anotar(cfg['cuota_col'], m - sum(p['saldo'] for p in completar))
+                    b = _anotar_neto(cfg['cuota_col'], m)
                     if favor:
                         b['sumas'].append(favor['saldo'])
                     for c_n in cuotas_ent:
                         b['txt'] = texto_agregar_cuota(b['txt'], c_n)
-                    piezas.append(f'c{_format_cuotas(cuotas_ent)}'
-                                  + (f' (usa saldo a favor {_pesos(favor["saldo"])})' if favor else ''))
+                    piezas.append(f'c{_format_cuotas(cuotas_ent)}' + favor_txt)
                 for p in completar:
                     b = _anotar(p['col'], p['saldo'])
                     b['txt'] = texto_completar_cuota(b['txt'], p['n'])
@@ -1803,7 +1841,7 @@ def procesar(
                     reclamo = (acumular['n'], acumular['saldo'] - resto, acumular['teo'], acumular['info'])
                     completadas.add(acumular['col'])
                 if parte_nueva is not None:
-                    b = _anotar(cfg['cuota_col'], parte_nueva)
+                    b = _anotar_neto(cfg['cuota_col'], m) if completar and acumular is None else _anotar(cfg['cuota_col'], parte_nueva)
                     b['txt'] = texto_agregar_cuota(b['txt'], f'parte de c{x_sig}')
                     piezas.append(f'parte de c{x_sig}')
                     _, info_act = teo_de(sname, srow, cfg['teo_col'], fecha_dt)
@@ -1817,6 +1855,7 @@ def procesar(
                     if resto_sin_asignar:
                         apuntes[-1]['sumas'][-1] += resto_sin_asignar
 
+                cols_favor = {pf['col'] for pf in favor['partes'] if (pf['hoja'], pf['fila']) == (sname, srow)} if favor else set()
                 usar_lote_p = len(matches) > 1
                 lote_val = wb_deu_data[sname].cell(srow, cfg['lote_col']).value if usar_lote_p else None
                 lote_str_p = f' l{lote_val}' if lote_val is not None else ''
@@ -1836,8 +1875,9 @@ def procesar(
                     'fecha': fecha_dt,
                     'etiqueta': piezas,
                     # el mes del que sale el saldo a favor no toca MAYOR CUOTA
-                    'bloques': [dict(snapshot(sname, srow, c), **({'max_cuota': None} if favor and c == favor['col'] else {}))
-                                for c in tocados],
+                    'bloques': [dict(snapshot(sname, srow, c), **({'max_cuota': None} if c in cols_favor else {}))
+                                for c in tocados]
+                               + [dict(snapshot(*k), max_cuota=None) for k in favor_otros],
                 })
                 if reclamo and reclamo[1] > tolerance and sname == HOJA_BOLSA and reclamos_out is not None:
                     n_r, saldo_r, teo_r, info_r = reclamo
@@ -2013,6 +2053,11 @@ def _format_cuotas(cuotas):
     return ', '.join(str(c) for c in cuotas[:-1]) + f' y {cuotas[-1]}'
 
 
+def _nombre_h(nombre):
+    """Nombre para col H: entero, sin saltos de línea ni espacios de más."""
+    return ' '.join(str(nombre).split())
+
+
 def _set_cell(cell, val):
     """Escribe val preservando el number_format de la celda. Excepción: si se
     escribe una fecha en una celda 'General' (típico de una columna de un mes
@@ -2065,8 +2110,8 @@ def aplicar(results, pago_menos, imp_bytes, deu_bytes, imp_sheet, sheets_cfg, pa
             filas[(r['hoja'], r['hoja_fila'])].append(r)
         if len(filas) == 1:
             cuotas = [r['cuota'] for r in grupo]
-            nombre_corto = str(grupo[0]['cliente'])[:38]
-            label = f"{nombre_corto}{grupo[0]['lote_str']} c{_format_cuotas(cuotas)}"
+            nombre = _nombre_h(grupo[0]['cliente'])
+            label = f"{nombre}{grupo[0]['lote_str']} c{_format_cuotas(cuotas)}"
         else:
             # Transferencia repartida en varios lotes: "Nombre l24 c16 y l25 c16"
             segs = []
@@ -2076,9 +2121,9 @@ def aplicar(results, pago_menos, imp_bytes, deu_bytes, imp_sheet, sheets_cfg, pa
                 if rs[0]['lote_str']:
                     segs.append(f"{rs[0]['lote_str'].strip()} c{cuotas_fila}")
                 else:
-                    segs.append(f"{str(rs[0]['cliente'])[:25]} c{cuotas_fila}")
+                    segs.append(f"{_nombre_h(rs[0]['cliente'])} c{cuotas_fila}")
             if grupo[0]['lote_str']:
-                label = f"{str(grupo[0]['cliente'])[:38]} " + ' y '.join(segs)
+                label = f"{_nombre_h(grupo[0]['cliente'])} " + ' y '.join(segs)
             else:
                 label = ' y '.join(segs)
         ws_edit.cell(row_num, 8).value = label
@@ -2087,7 +2132,7 @@ def aplicar(results, pago_menos, imp_bytes, deu_bytes, imp_sheet, sheets_cfg, pa
 
     # Clientes USD fijo que pagaron en pesos (solo los habilitados)
     for e in (usd_en_pesos or []):
-        ws_edit.cell(e['imp_row'], 8).value = f"{str(e['cliente'])[:38]} c{e['cuota']}"
+        ws_edit.cell(e['imp_row'], 8).value = f"{_nombre_h(e['cliente'])} c{e['cuota']}"
         for cell in ws_edit[e['imp_row']]:
             cell.fill = YELLOW_FILL
         cfg = sheets_cfg[e['hoja']]
@@ -2126,7 +2171,7 @@ def aplicar(results, pago_menos, imp_bytes, deu_bytes, imp_sheet, sheets_cfg, pa
     # Partes de cuota. En orden: si un bloque se tocó varias veces en la corrida,
     # el último snapshot ya trae el acumulado (incluidas las cuotas enteras).
     for r in con_partes:
-        label = f"{str(r['cliente'])[:38]}{r['lote_str']} " + ' y '.join(r['etiqueta'])
+        label = f"{_nombre_h(r['cliente'])}{r['lote_str']} " + ' y '.join(r['etiqueta'])
         ws_edit.cell(r['imp_row'], 8).value = label
         for cell in ws_edit[r['imp_row']]:
             cell.fill = YELLOW_FILL
