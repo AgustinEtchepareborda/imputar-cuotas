@@ -1100,15 +1100,27 @@ def procesar(
                 mx = n
         return mx
 
-    def cuota_previa_sin_historial(sname, srow, cuit, lotes):
+    col_primera = {}
+
+    def cuota_previa_sin_historial(sname, srow, cuit, lotes, fecha=None):
         """Última cuota para una fila SIN historial en deudores. Las semanas
         anteriores dan la última cuota del CUIT, pero no de qué lote: si el
         cliente tiene otro lote con historial, esta fila es un lote nuevo y
-        arranca en c1 (devuelve 0), no sigue la numeración del otro lote."""
+        arranca en c1 (devuelve 0), no sigue la numeración del otro lote.
+        Venta nueva (solo pagó el anticipo): si la transferencia es del mes de
+        la "Primera cuota" (col D) o de antes, es la c1."""
         otros = [(s, r) for s, r, _ in lotes if (s, r) != (sname, srow)]
         if any(max_cuota_fila(s, r) is not None for s, r in otros):
             return 0
-        return cuit_to_cuota_previo.get(cuit)
+        previa = cuit_to_cuota_previo.get(cuit)
+        if previa is None and fecha is not None:
+            if sname not in col_primera:
+                col_primera[sname] = _col_por_header(wb_deu_f[sname], sheets_cfg[sname]['header_row'], ('primera cuota',))
+            primera = parse_date(wb_deu_data[sname].cell(srow, col_primera[sname]).value) if col_primera[sname] else None
+            if primera is not None and (fecha.year, fecha.month) <= (primera.year, primera.month):
+                log_fn(f'{sname} fila {srow}: sin historial y primera cuota {primera:%m/%Y} → c1')
+                return 0
+        return previa
 
     def max_entera_fila(sname, srow):
         """Mayor cuota ENTERA de la fila (sin las 'parte de cN'), mirando todos
@@ -1768,11 +1780,12 @@ def procesar(
             else:
                 x_max = max_cuota_fila(sname, srow)
                 if x_max is None:
-                    x_max = cuota_previa_sin_historial(sname, srow, cuit_raw, matches)
+                    x_max = cuota_previa_sin_historial(sname, srow, cuit_raw, matches, fecha_dt)
                 if x_max is None and cuit_raw in cuota_override:
                     x_max = cuota_override[cuit_raw] - 1
                 if x_max is None and (enteras or parte_nueva is not None):
                     ambiguous.append({'row': row_num, 'motivo': 'No se pudo determinar número de cuota (sin historial)', 'cliente': snombre, 'cuit': cuit_raw, 'hoja': sname, 'hoja_fila': srow})
+                    sin_fila.append({'imp_row': row_num, 'nombre': snombre})
                     continue
                 x_sig = (x_max or 0) + 1
 
@@ -1955,7 +1968,7 @@ def procesar(
                     if n_celda is not None and (max_hist is None or n_celda > max_hist):
                         max_hist = n_celda
 
-                previa = None if max_hist is not None else cuota_previa_sin_historial(p_sname, p_srow, cuit_raw, matches)
+                previa = None if max_hist is not None else cuota_previa_sin_historial(p_sname, p_srow, cuit_raw, matches, fecha_dt)
                 if max_hist is not None:
                     next_cuota = max_hist + 1
                 elif previa is not None:
@@ -1972,6 +1985,7 @@ def procesar(
 
         if error_motivo:
             ambiguous.append({'row': row_num, 'motivo': error_motivo, 'cliente': snombre, 'cuit': cuit_raw, 'hoja': sname, 'hoja_fila': srow})
+            sin_fila.append({'imp_row': row_num, 'nombre': snombre})  # que col H no quede vacía
             continue
 
         # Si el cliente tiene más de un lote en deudores (por CUIT o por nombre),

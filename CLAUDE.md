@@ -89,7 +89,8 @@ En cambio, el script:
    - Si es un número normal → ya está imputado este mes, no volver a imputar
 2. Si está vacía, escanea **todas las columnas históricas** "NUMERO DE CUOTA" (meses anteriores) en la misma fila y toma el máximo + 1
 3. Si no hay historial en deudores, busca en las últimas hojas de imputaciones (semanas previas) la cuota imputada para ese CUIT. **Excepción**: si el cliente tiene otro lote con historial, la fila sin historial es un lote nuevo → `c1` (la cuota de las semanas previas es del otro lote)
-4. Si aún no hay dato, usa `CUOTA_OVERRIDE` (dict manual en el CONFIG del script)
+4. **Venta nueva** (sin cuotas, solo el anticipo): si la transferencia es del mes de la "Primera cuota" (col D) o de antes → `c1`
+5. Si aún no hay dato, usa `CUOTA_OVERRIDE` (dict manual en el CONFIG del script)
 
 ## Cómo resuelve el script clientes no encontrados por CUIT
 
@@ -125,6 +126,7 @@ Cada hoja semanal ("S 121", "USD 5", etc.) tiene:
 - Solo procesar filas NO amarillas y sin "PAGO MENOS" en col H (salvo `reprocesar_pago_menos`)
 - Identificar cliente por CUIT/CUIL extraído del campo Concepto
 - Si no hay CUIT extraíble → reportar como ambiguo
+- Si el cliente está identificado pero igual va a ambiguos (p. ej. sin historial de cuotas), su nombre se escribe en col H sin pintar la fila, para que no quede vacía
 - **Pesos**: si pagó MENOS y diferencia > tolerancia ($3.000) → "parte de cN" (ver "Partes de cuota")
 - **USD**: si pagó MENOS y diferencia > U$D 5 → escribir "PAGO MENOS" en col H
 - Si pagó menos pero diferencia ≤ tolerancia → imputar normalmente (cuota entera)
